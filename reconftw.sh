@@ -1357,7 +1357,7 @@ function sub_scraping() {
 			subdomains_count=$(wc -l <"$dir/subdomains/subdomains.txt")
 			if [[ $subdomains_count -le $DEEP_LIMIT ]] || [[ $DEEP == true ]]; then
 
-				urlfinder -d $domain -s all -o .tmp/url_extract_tmp.txt 2>>"$LOGFILE" >/dev/null
+				urlfinder -d $domain -all -o .tmp/url_extract_tmp.txt 2>>"$LOGFILE" >/dev/null
 
 				if [[ -s ".tmp/url_extract_tmp.txt" ]]; then
 					cat .tmp/url_extract_tmp.txt | grep "$domain" |
@@ -2889,7 +2889,7 @@ function favicon() {
 		fi
 
 		# Run the favicon IP lookup tool
-		timeout 10m "${tools}/fav-up/venv/bin/python3" "${tools}/fav-up/favUp.py" -w "$domain" -sc -o favicontest.json 2>>"$LOGFILE" >/dev/null
+		timeout 10m "python" "${tools}/fav-up/favUp.py" -w "$domain" -sc -o favicontest.json 2>>"$LOGFILE" >/dev/null
 
 		# Process the results if favicontest.json exists and is not empty
 		if [[ -s "favicontest.json" ]]; then
@@ -2974,6 +2974,9 @@ function portscan() {
 			sort ".tmp/ips_nocdn.txt"
 		fi
 
+		if [[ -s ".tmp/ips_nocdn.txt" && -s "hosts/favicontest.txt" ]]; then
+			cat .tmp/ips_nocdn.txt hosts/favicontest.txt | sort -u > .tmp/ips_nocdn.txt
+		fi
 		printf "%b\n[%s] Scanning ports...%b\n\n" "$bblue" "$(date +'%Y-%m-%d %H:%M:%S')" "$reset"
 
 		ips_file="${dir}/hosts/ips.txt"
@@ -3197,10 +3200,12 @@ function nuclei_check() {
 		if [[ ! -s "webs/webs_all.txt" ]]; then
 			cat webs/webs.txt webs/webs_uncommon_ports.txt 2>/dev/null | anew -q webs/webs_all.txt
 		fi
-
+		if [[ ! -s ".tmp/ips_port.txt" ]]; then
+			python3 $tools/nmapXml2txt/nmapXml2txt.py hosts/portscan_active.xml | anew -q .tmp/ips_port.txt
+		fi
 		# Combine url_extract_nodupes.txt, subdomains.txt, and webs_all.txt into webs_subs.txt if it doesn't exist
 		if [[ ! -s ".tmp/webs_subs.txt" ]]; then
-			cat subdomains/subdomains.txt webs/webs_all.txt 2>>"$LOGFILE" >.tmp/webs_subs.txt
+			cat subdomains/subdomains.txt webs/webs_all.txt .tmp/ips_nocdn.txt .tmp/ips_port.txt 2>>"$LOGFILE" >.tmp/webs_subs.txt
 		fi
 
 		# Check if AXIOM is enabled
@@ -3484,7 +3489,7 @@ function urlchecks() {
 		if [[ -s "webs/webs_all.txt" ]]; then
 
 			if [[ $URL_CHECK_PASSIVE == true ]]; then
-				urlfinder -d $domain -s all -o .tmp/url_extract_tmp.txt 2>>"$LOGFILE" >/dev/null
+				urlfinder -d $domain -all -o .tmp/url_extract_tmp.txt 2>>"$LOGFILE" >/dev/null
 				if [[ -s $GITHUB_TOKENS ]]; then
 					github-endpoints -q -k -d "$domain" -t "$GITHUB_TOKENS" -o .tmp/github-endpoints.txt 2>>"$LOGFILE" >/dev/null
 					if [[ -s ".tmp/github-endpoints.txt" ]]; then
@@ -3582,7 +3587,7 @@ function url_gf() {
 		start_func "${FUNCNAME[0]}" "Vulnerable Pattern Search"
 
 		# Ensure webs_nuclei.txt exists and is not empty
-		if [[ -s "webs/webs_nuclei.txt" ]]; then
+		if [[ -s "webs/url_extract.txt" ]]; then
 			# Define an array of GF patterns
 			declare -A gf_patterns=(
 				["xss"]="gf/xss.txt"
