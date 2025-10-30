@@ -1357,8 +1357,7 @@ function sub_scraping() {
 			subdomains_count=$(wc -l <"$dir/subdomains/subdomains.txt")
 			if [[ $subdomains_count -le $DEEP_LIMIT ]] || [[ $DEEP == true ]]; then
 
-				urlfinder -d $domain -all -o .tmp/url_extract_tmp.txt 2>>"$LOGFILE" >/dev/null
-
+				urlfinder -d $domain -s all -o .tmp/url_extract_tmp.txt 2>>"$LOGFILE" >/dev/null
 				if [[ -s ".tmp/url_extract_tmp.txt" ]]; then
 					cat .tmp/url_extract_tmp.txt | grep "$domain" |
 						grep -aEo 'https?://[^ ]+' |
@@ -3014,7 +3013,7 @@ function portscan() {
 		if [[ $PORTSCAN_ACTIVE == true ]]; then
 			if [[ $AXIOM != true ]]; then
 				if [[ -s ".tmp/ips_nocdn.txt" ]]; then
-					$SUDO nmap $PORTSCAN_ACTIVE_OPTIONS -iL .tmp/ips_nocdn.txt -oA hosts/portscan_active 2>>"$LOGFILE" >/dev/null
+					$SUDO nmap $PORTSCAN_ACTIVE_OPTIONS -iL .tmp/ips_nocdn.txt -oA hosts/portscan_active 2>>"$LOGFILE" 
 				fi
 			else
 				if [[ -s ".tmp/ips_nocdn.txt" ]]; then
