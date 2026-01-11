@@ -111,7 +111,7 @@ declare -A repos=(
 	["sus_params"]="g0ldencybersec/sus_params"
 	["Corsy"]="s0md3v/Corsy"
 	["CMSeeK"]="Tuhinshubhra/CMSeeK"
-	["fav-up"]="pielco11/fav-up"
+	["fav-up"]="mastercho/fav-up"
 	["massdns"]="blechschmidt/massdns"
 	["Oralyzer"]="r0075h3ll/Oralyzer"
 	["testssl.sh"]="drwetter/testssl.sh"
@@ -134,7 +134,7 @@ declare -A repos=(
 	["msftrecon"]="Arcanum-Sec/msftrecon"
 	["Scopify"]="Arcanum-Sec/Scopify"
 	["metagoofil"]="opsdisk/metagoofil"
-	["EmailHarvester"]="maldevel/EmailHarvester"
+	["EmailHarvester"]="mastercho/EmailHarvester"
 	["reconftw_ai"]="six2dez/reconftw_ai"
 )
 
