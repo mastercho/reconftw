@@ -2535,29 +2535,33 @@ function s3buckets() {
 			printf "%b[!] Failed to initialize cloudhunter_open_buckets.txt.%b\n" "$bred" "$reset"
 		fi
 
-		# Determine the CloudHunter permutations flag based on the config
-		PERMUTATION_FLAG=""
-		case "$CLOUDHUNTER_PERMUTATION" in
-		DEEP)
-			PERMUTATION_FLAG="-p $tools/CloudHunter/permutations-big.txt"
-			;;
-		NORMAL)
-			PERMUTATION_FLAG="-p $tools/CloudHunter/permutations.txt"
-			;;
-		NONE)
-			PERMUTATION_FLAG=""
-			;;
-		*)
-			printf "%b[!] Invalid value for CLOUDHUNTER_PERMUTATION: %s.%b\n" "$bred" "$CLOUDHUNTER_PERMUTATION" "$reset"
-			return 1
-			;;
-		esac
+    PERMUTATION_FLAG=""
+    PERMUTATION_FILE=""
+    
+    case "$CLOUDHUNTER_PERMUTATION" in
+      DEEP)
+        PERMUTATION_FLAG="-p"
+        PERMUTATION_FILE="/root/Tools/CloudHunter/permutations-big.txt"
+        ;;
+      NORMAL)
+        PERMUTATION_FLAG="-p"
+        PERMUTATION_FILE="/root/Tools/CloudHunter/permutations.txt"
+        ;;
+      NONE)
+        PERMUTATION_FLAG=""
+        PERMUTATION_FILE=""
+        ;;
+      *)
+        printf "%b[!] Invalid value for CLOUDHUNTER_PERMUTATION: %s.%b\n" "$bred" "$CLOUDHUNTER_PERMUTATION" "$reset"
+        return 1
+        ;;
+    esac
 
 		# Debug: Print the full CloudHunter command
-		printf "CloudHunter command: %s/venv/bin/python3 %s/cloudhunter.py %s -r %s/resolvers.txt -t 50 [URL]\n" "$tools/CloudHunter" "$tools/CloudHunter" "$PERMUTATION_FLAG" "$tools/CloudHunter" >>"$LOGFILE"
+		printf "CloudHunter command: %s/venv/bin/python3 %s/cloudhunter.py %s -r %s/resolvers.txt -t 50 [URL]\n" "/root/Tools/CloudHunter" "/root/Tools/CloudHunter" $PERMUTATION_FLAG "$PERMUTATION_FILE" "/root/Tools/CloudHunter" >>"$LOGFILE"
 
 		# Debug: Check if files exist
-		if [[ -f "$tools/CloudHunter/cloudhunter.py" ]]; then
+		if [[ -f "/root/Tools/CloudHunter/cloudhunter.py" ]]; then
 			printf "cloudhunter.py exists\n" >>"$LOGFILE"
 		else
 			printf "cloudhunter.py not found\n" >>"$LOGFILE"
@@ -2572,7 +2576,7 @@ function s3buckets() {
 			fi
 		fi
 
-		if [[ -f "$tools/CloudHunter/resolvers.txt" ]]; then
+		if [[ -f "/root/Tools/CloudHunter/resolvers.txt" ]]; then
 			printf "resolvers.txt exists\n" >>"$LOGFILE"
 		else
 			printf "resolvers.txt not found\n" >>"$LOGFILE"
@@ -2580,11 +2584,11 @@ function s3buckets() {
 
 		printf "Processing domain: %s\n" "$domain" >>"$LOGFILE"
 		(
-			if ! cd "$tools/CloudHunter"; then
-				printf "%b[!] Failed to cd to %s.%b\n" "$bred" "$tools/CloudHunter" "$reset"
+			if ! cd "/root/Tools/CloudHunter"; then
+				printf "%b[!] Failed to cd to %s.%b\n" "$bred" "/root/Tools/CloudHunter" "$reset"
 				return 1
 			fi
-			if ! "${tools}/CloudHunter/venv/bin/python3" ./cloudhunter.py ${PERMUTATION_FLAG} -r ./resolvers.txt -t 50 "$domain"; then
+			if ! "/root/Tools/CloudHunter/venv/bin/python3" ./cloudhunter.py $PERMUTATION_FLAG "$PERMUTATION_FILE" -r ./resolvers.txt -t 50 "$domain"; then
 				printf "%b[!] CloudHunter command failed for URL %s.%b\n" "$bred" "$url" "$reset"
 			fi
 		) >>"$dir/subdomains/cloudhunter_open_buckets.txt" 2>>"$LOGFILE"
@@ -4190,7 +4194,7 @@ function jschecks() {
 				mkdir -p .tmp/sourcemapper/secrets
 				for i in $(cat js/js_secrets.txt | cut -d' ' -f2); do wget -q -P .tmp/sourcemapper/secrets $i; done
 				trufflehog filesystem .tmp/sourcemapper/ -j 2>/dev/null | jq -c | anew -q js/js_secrets_jsmap.txt
-				find .tmp/sourcemapper/ -type f -name "*.js" | jsluice secrets -j --patterns=~/Tools/jsluice_patterns.json | anew -q js/js_secrets_jsmap_jsluice.txt
+				find .tmp/sourcemapper/ -type f -name "*.js" | jsluice secrets -j --patterns=/root/Tools/jsluice_patterns.json | anew -q js/js_secrets_jsmap_jsluice.txt
 			fi
 
 			printf "%bRunning: Building wordlist 6/6%b\n" "$yellow" "$reset"
@@ -4915,14 +4919,13 @@ function sqli() {
 				# Check if SQLMAP is enabled and run SQLMap
 				if [[ $SQLMAP == true ]]; then
 					printf "${yellow}\n[$(date +'%Y-%m-%d %H:%M:%S')] Running: SQLMap for SQLi Checks${reset}\n\n"
-					python3 "${tools}/sqlmap/sqlmap.py" -m ".tmp/tmp_sqli.txt" -b -o --smart \
-						--batch --disable-coloring --random-agent --output-dir="vulns/sqlmap" 2>>"$LOGFILE" >/dev/null
+					python3 "${tools}/sqlmap/sqlmap.py" -m ".tmp/tmp_sqli.txt" -b -o --smart --batch --disable-coloring --random-agent --level=5 --risk=3 --current-db --output-dir="vulns/sqlmap" 2>>"$LOGFILE" >/dev/null
 				fi
 
 				# Check if GHAURI is enabled and run Ghauri
 				if [[ $GHAURI == true ]]; then
 					printf "${yellow}\n[$(date +'%Y-%m-%d %H:%M:%S')] Running: Ghauri for SQLi Checks${reset}\n\n"
-					interlace -tL ".tmp/tmp_sqli.txt" -threads "$INTERLACE_THREADS" -c "ghauri -u _target_ --batch -H \"${HEADER}\" --force-ssl >> vulns/ghauri_log.txt" 2>>"$LOGFILE" >/dev/null
+					interlace -tL ".tmp/tmp_sqli.txt" -threads "$INTERLACE_THREADS" -c "ghauri -u _target_ -H \"${HEADER}\" --force-ssl --current-db --batch --level=3 >> vulns/ghauri_log.txt" 2>>"$LOGFILE" >/dev/null
 				fi
 
 				end_func "Results are saved in vulns/sqlmap folder" "${FUNCNAME[0]}"
@@ -5360,11 +5363,11 @@ function fuzzparams() {
 				maybe_update_nuclei
 
 				# Pull latest fuzzing templates
-				if ! git -C ${NUCLEI_FUZZING_TEMPLATES_PATH} pull 2>>"$LOGFILE"; then
-					printf "%b[!] Failed to pull latest fuzzing templates.%b\n" "$bred" "$reset"
-					end_func "Failed to pull latest fuzzing templates." "${FUNCNAME[0]}"
-					return 1
-				fi
+#				if ! git -C ${NUCLEI_FUZZING_TEMPLATES_PATH} pull 2>>"$LOGFILE"; then
+#					printf "%b[!] Failed to pull latest fuzzing templates.%b\n" "$bred" "$reset"
+#					end_func "Failed to pull latest fuzzing templates." "${FUNCNAME[0]}"
+#					return 1
+#				fi
 
 				# Execute Nuclei with the fuzzing templates
 				nuclei -l webs/url_extract_nodupes.txt -nh -rl "$NUCLEI_RATELIMIT" -silent -retries 2 ${NUCLEI_EXTRA_ARGS} -t ${NUCLEI_TEMPLATES_PATH}/dast -dast -j -o ".tmp/fuzzparams_json.txt" <"webs/url_extract_nodupes.txt" 2>>"$LOGFILE" >/dev/null
@@ -6052,9 +6055,11 @@ function build_hotlist() {
 	done
 	# Real IPs via favicon
 	if [[ -s hosts/favicontest.txt ]]; then
-		while read -r ip; do
-			score["$ip"]=$((${score["$ip"]:-0} + 4))
-		done <hosts/favicontest.txt
+    while read -r ip; do
+        ip="${ip//$'\r'/}"
+        [[ -z "$ip" ]] && continue
+        score["$ip"]=$((${score["$ip"]:-0} + 4))
+    done < hosts/favicontest.txt
 	fi
 	# New assets bonus
 	for p in .tmp/subs_new_only.txt webs/url_extract.txt; do
@@ -6943,7 +6948,7 @@ if [[ -n $inScope_file ]]; then
 fi
 
 if [[ $(id -u | grep -o '^0$') == "0" ]]; then
-	SUDO=" "
+	SUDO=""
 else
 	SUDO="sudo"
 fi
