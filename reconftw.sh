@@ -3408,7 +3408,7 @@ function nuclei_check() {
 		fi
 		# Combine url_extract_nodupes.txt, subdomains.txt, and webs_all.txt into webs_subs.txt if it doesn't exist
 		if [[ ! -s ".tmp/webs_subs.txt" ]]; then
-			cat subdomains/subdomains.txt webs/webs_all.txt .tmp/ips_nocdn.txt .tmp/ips_port.txt 2>>"$LOGFILE" >.tmp/webs_subs.txt
+			cat subdomains/subdomains.txt webs/webs_all.txt .tmp/ips_nocdn.txt hosts/webs.txt .tmp/ips_port.txt 2>>"$LOGFILE" >.tmp/webs_subs.txt
 		fi
 
 		# Prepare WAF-aware lists
