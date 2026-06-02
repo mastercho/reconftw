@@ -65,6 +65,8 @@ VERBOSE=${VERBOSE:-false}
 LOGFILE=${LOGFILE-}
 DRY_RUN=${DRY_RUN:-false}
 TOOLS_ONLY=${TOOLS_ONLY:-false}
+RECONFTW_GIT_REPO="https://github.com/mastercho/reconftw.git"
+RECONFTW_GIT_BRANCH="main"
 
 # If LOGFILE provided via env/flag, tee all output
 if [[ -n ${LOGFILE} ]]; then
@@ -704,16 +706,15 @@ function reset_git_proxies() {
 function check_updates() {
     printf "%bRunning: Looking for new reconFTW version%b\n" "$bblue" "$reset"
 
-    if { [[ -n $TIMEOUT_CMD ]] && $TIMEOUT_CMD 10 git fetch; } || git fetch; then
-        local BRANCH
-        BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
+    if { [[ -n $TIMEOUT_CMD ]] && $TIMEOUT_CMD 10 git fetch "$RECONFTW_GIT_REPO" "$RECONFTW_GIT_BRANCH"; } \
+        || git fetch "$RECONFTW_GIT_REPO" "$RECONFTW_GIT_BRANCH"; then
         HEADHASH=$(git rev-parse HEAD 2>/dev/null || true)
-        # Skip auto-update if no upstream (detached HEAD or no tracking branch)
-        if ! git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
-            printf "%bNo upstream configured (detached HEAD). Skipping auto-update.%b\n" "$yellow" "$reset"
-            return 0
+        UPSTREAMHASH=$(git rev-parse FETCH_HEAD 2>/dev/null || true)
+
+        if [[ -z $HEADHASH || -z $UPSTREAMHASH ]]; then
+            printf "\n%b[!] Unable to resolve local or remote revision.%b\n" "$bred" "$reset"
+            return 1
         fi
-        UPSTREAMHASH=$(git rev-parse "@{u}")
 
         if [[ $HEADHASH != "$UPSTREAMHASH" ]]; then
             local cfg_backup="" cfg_backup_ts=""
@@ -733,7 +734,7 @@ function check_updates() {
                 printf "%breconftw.cfg has been backed up to %s%b\n" "$yellow" "$cfg_backup" "$reset"
             fi
             git stash --include-untracked &>/dev/null || true
-            run_to 60 git pull &>/dev/null
+            run_to 60 git pull "$RECONFTW_GIT_REPO" "$RECONFTW_GIT_BRANCH" &>/dev/null
             git stash pop &>/dev/null || true
             printf "%bUpdated! Running the new installer version...%b\n" "$bgreen" "$reset"
 

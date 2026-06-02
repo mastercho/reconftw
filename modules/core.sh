@@ -174,35 +174,23 @@ function check_version() {
         return 1
     fi
 
-    # Fetch updates with a bounded timeout when available.
-    # Do not run an unbounded fallback fetch after a timeout, otherwise callers
-    # wrapped by `timeout` (tests/CI) can be killed before main logic runs.
+    local update_repo="https://github.com/mastercho/reconftw.git"
+    local update_branch="main"
+
     if [[ -n $TIMEOUT_CMD ]]; then
-        if ! $TIMEOUT_CMD 10 git fetch >/dev/null 2>&1; then
+        if ! $TIMEOUT_CMD 10 git fetch "$update_repo" "$update_branch" >/dev/null 2>&1; then
             _print_error "Unable to check updates (git fetch timed out)"
             return 1
         fi
-    elif ! git fetch >/dev/null 2>&1; then
+    elif ! git fetch "$update_repo" "$update_branch" >/dev/null 2>&1; then
         _print_error "Unable to check updates"
-        return 1
-    fi
-
-    # Get current branch name
-    local BRANCH
-    BRANCH=$(git rev-parse --abbrev-ref HEAD)
-
-    # Get upstream branch
-    local UPSTREAM
-    UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name "@{u}" 2>/dev/null)
-    if [[ -z $UPSTREAM ]]; then
-        _print_error "No upstream branch set for '${BRANCH}'. Cannot check for updates"
         return 1
     fi
 
     # Get local and remote commit hashes
     local LOCAL REMOTE
     LOCAL=$(git rev-parse HEAD)
-    REMOTE=$(git rev-parse "$UPSTREAM")
+    REMOTE=$(git rev-parse FETCH_HEAD)
 
     # Compare local and remote hashes
     if [[ $LOCAL != "$REMOTE" ]]; then
