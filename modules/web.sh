@@ -768,7 +768,7 @@ function portscan() {
             if [[ "$used_targeted_output" != true ]]; then
                 if [[ $AXIOM != true ]]; then
                     if [[ -s ".tmp/ips_nocdn.txt" ]]; then
-                        run_command "$SUDO" nmap "${portscan_opts[@]}" -iL .tmp/ips_nocdn.txt -oA hosts/portscan_active 2>>"$LOGFILE" >/dev/null
+                        run_command "$SUDO" nmap "${portscan_opts[@]}" -iL .tmp/ips_nocdn.txt -oA hosts/portscan_active 2>>"$LOGFILE"
                     fi
                 else
                     if [[ -s ".tmp/ips_nocdn.txt" ]]; then
@@ -1149,9 +1149,10 @@ function nuclei_check() {
 
         ensure_webs_all || true
 
-        # Combine webs_all.txt targets (with protocol) - avoid duplicate scans
+        # Combine subdomain, web, IP, and portscan-derived targets for nuclei
         if [[ ! -s ".tmp/webs_subs.txt" ]]; then
-            cat webs/webs_all.txt 2>>"$LOGFILE" | sort -u >.tmp/webs_subs.txt
+            cat subdomains/subdomains.txt webs/webs_all.txt .tmp/ips_nocdn.txt hosts/webs.txt 2>>"$LOGFILE" \
+                | sed '/^$/d' | sort -u >.tmp/webs_subs.txt
         fi
 
         # Prepare WAF-aware lists and run scans
