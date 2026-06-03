@@ -323,7 +323,16 @@ build_cloud_enum_command() {
     )
 
     if [[ -f "$resolvers" ]]; then
-        cmd_ref+=(-nsf "$resolvers")
+        local cloud_enum_script="${tools}/cloud_enum/cloud_enum.py"
+        if [[ -r "$cloud_enum_script" ]] && grep -q 'nameserverfile' "$cloud_enum_script" 2>/dev/null; then
+            cmd_ref+=(-nsf "$resolvers")
+        else
+            local first_ns
+            first_ns=$(grep -vE '^\s*#|^\s*$' "$resolvers" | grep -Eo '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            if [[ -n "$first_ns" ]]; then
+                cmd_ref+=(-ns "$first_ns")
+            fi
+        fi
     fi
     if [[ "$cloud_enum_quickscan" == true ]]; then
         cmd_ref+=(-qs)

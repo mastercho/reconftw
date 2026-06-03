@@ -1236,6 +1236,11 @@ init_dns_resolver() {
         "$(date +'%Y-%m-%d %H:%M:%S')" "$DNS_RESOLVER_SELECTED" "${DNS_RESOLVER:-auto}" "${ip:-}" "$RECON_BEHIND_NAT" >>"${LOGFILE:-/dev/null}"
 }
 
+# Return 0 when the host should use NAT-safe DNS (dnsx), 1 when puredns is OK.
+_is_behind_nat() {
+    [[ "${RECON_BEHIND_NAT:-yes}" == "yes" ]]
+}
+
 # Select DNS resolver based on DNS_RESOLVER config and NAT detection.
 # Returns "puredns" or "dnsx".
 _select_dns_resolver() {

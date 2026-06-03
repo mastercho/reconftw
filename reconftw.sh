@@ -835,6 +835,7 @@ case $opt_mode in
             }
             LOGFILE="${dir}/.log/${NOW}_${NOWT}.txt"
             called_fn_dir=$dir/.called_fn
+            init_dns_resolver
             run_module_with_axiom_failover "$custom_function"
             cd "${SCRIPTPATH}" || {
                 echo "Failed to cd directory '${SCRIPTPATH}'"
