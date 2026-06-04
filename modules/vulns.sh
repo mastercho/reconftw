@@ -402,7 +402,7 @@ function ssti() {
 
                 end_func "Results are saved in vulns/ssti.txt" "${FUNCNAME[0]}"
             else
-                end_func "Skipping SSTI: Too many URLs to test, try with --deep flag." "${FUNCNAME[0]}"
+                end_func "Skipping SSTI: Too many URLs to test, try with --deep flag." "${FUNCNAME[0]}" "SKIP"
             fi
         else
             end_func "No gf/ssti.txt file found, SSTI Checks skipped." "${FUNCNAME[0]}"
@@ -463,7 +463,7 @@ function sqli() {
 
                 end_func "Results are saved in vulns/sqlmap folder" "${FUNCNAME[0]}"
             else
-                end_func "Skipping SQLi: Too many URLs to test, try with --deep flag." "${FUNCNAME[0]}"
+                end_func "Skipping SQLi: Too many URLs to test, try with --deep flag." "${FUNCNAME[0]}" "SKIP"
             fi
         else
             end_func "No gf/sqli.txt file found, SQLi Checks skipped." "${FUNCNAME[0]}"
@@ -1041,7 +1041,7 @@ _wp_brute_base_url() {
     [[ -n "$raw" ]] && printf '%s\n' "$raw"
 }
 
-# Collect WordPress targets from nuclei JSON only (wordpress / wp-* / xmlrpc templates).
+# Collect WordPress targets from nuclei JSON (strict template ids; avoids Laravel/generic -wp- noise).
 _wp_brute_collect_targets() {
     : >".tmp/wp_brute_targets.txt"
 
@@ -1053,7 +1053,7 @@ _wp_brute_collect_targets() {
     for json_file in nuclei_output/*_json.txt nuclei_output/dast_json.txt; do
         [[ -s "$json_file" ]] || continue
         jq -r '
-            select((."template-id" // "" | test("(?i)(^wordpress|^wp-|-wp-|xmlrpc|wp-user|wp-login)"))) |
+            select((."template-id" // "" | test("(?i)(^wordpress|wp-user|wp-login|xmlrpc)"))) |
             (.["matched-at"] // .host // empty)
         ' "$json_file" 2>/dev/null | while IFS= read -r line; do
             _wp_brute_base_url "$line" | anew -q ".tmp/wp_brute_targets.txt"
@@ -1061,6 +1061,87 @@ _wp_brute_collect_targets() {
     done
 
     sort -u ".tmp/wp_brute_targets.txt" -o ".tmp/wp_brute_targets.txt" 2>/dev/null || true
+}
+
+# Map nuclei wp-user-enum extracted usernames per base URL (built once per wp_brute_pro run).
+_wp_brute_collect_nuclei_users() {
+    : >".tmp/wp_brute_nuclei_users.tsv"
+
+    local json_file
+    if [[ ! -d nuclei_output ]]; then
+        return 0
+    fi
+
+    for json_file in nuclei_output/*_json.txt nuclei_output/dast_json.txt; do
+        [[ -s "$json_file" ]] || continue
+        jq -r '
+            select((."template-id" // "" | test("(?i)wp-user"))) |
+            (.["matched-at"] // .host // empty) as $m |
+            (.["extracted-results"] // [])[]? |
+            select(. != null and (. | tostring | length) > 0) |
+            [$m, (. | tostring)] | @tsv
+        ' "$json_file" 2>/dev/null >>".tmp/wp_brute_nuclei_users.tsv"
+    done
+}
+
+_wp_brute_nuclei_users_csv() {
+    local target_url="$1"
+    local base_url
+
+    base_url=$(_wp_brute_base_url "$target_url")
+    [[ -n "$base_url" && -s ".tmp/wp_brute_nuclei_users.tsv" ]] || return 1
+
+    awk -F'\t' -v base="$base_url" '
+    function norm(u) {
+        sub(/\r$/, "", u)
+        sub(/\/$/, "", u)
+        sub(/:443$/, "", u)
+        sub(/:80$/, "", u)
+        return tolower(u)
+    }
+    norm($1) == norm(base) {
+        user = $2
+        gsub(/[^a-zA-Z0-9._-]/, "", user)
+        if (user != "") print user
+    }' ".tmp/wp_brute_nuclei_users.tsv" | sort -u | paste -sd, -
+}
+
+# Log which nuclei template(s) put this URL on the wp_brute target list.
+_wp_brute_log_nuclei_provenance() {
+    local target_url="$1"
+    local base_url json_file tid
+
+    base_url=$(_wp_brute_base_url "$target_url")
+    [[ -n "$base_url" && -d nuclei_output ]] || return 0
+
+    for json_file in nuclei_output/*_json.txt nuclei_output/dast_json.txt; do
+        [[ -s "$json_file" ]] || continue
+        while IFS= read -r tid; do
+            [[ -n "$tid" ]] || continue
+            log_note "wp_brute_pro: nuclei template ${tid} matched ${target_url}" "${FUNCNAME[0]}" "${LINENO}"
+        done < <(jq -r --arg base "$base_url" '
+            def norm: gsub("\\r$"; "") | sub("/$"; "") | sub(":443$"; "") | sub(":80$"; "") | ascii_downcase;
+            select((."template-id" // "" | test("(?i)(^wordpress|wp-user|wp-login|xmlrpc)"))) |
+            ((.["matched-at"] // .host // "") | norm) as $m |
+            ($base | norm) as $b |
+            select($m == $b) | ."template-id"
+        ' "$json_file" 2>/dev/null)
+    done
+}
+
+_wp_brute_scan_is_wordpress() {
+    local scan_json="$1"
+    [[ -s "$scan_json" ]] || return 1
+
+    local xmlrpc login wpv
+    xmlrpc=$(jq -r '.xmlrpc_active // false' "$scan_json" 2>/dev/null)
+    login=$(jq -r '.login_url // empty' "$scan_json" 2>/dev/null)
+    wpv=$(jq -r '.wp_version // empty' "$scan_json" 2>/dev/null)
+
+    [[ "$xmlrpc" == "true" ]] && return 0
+    [[ -n "$login" && "$login" != "null" ]] && return 0
+    [[ -n "$wpv" && "$wpv" != "null" ]] && return 0
+    return 1
 }
 
 _wp_brute_safe_dirname() {
@@ -1219,6 +1300,7 @@ function wp_brute_pro() {
         attack_wordlist=".tmp/wp_brute_attack_wordlist.txt"
 
         company_name="${domain%%.*}"
+        _wp_brute_collect_nuclei_users
 
         while IFS= read -r target_url; do
             [[ -z "$target_url" ]] && continue
@@ -1227,15 +1309,30 @@ function wp_brute_pro() {
             scan_json_rel="vulns/wp_brute/${host_key}/scan.json"
             mkdir -p "$out_dir"
 
+            _wp_brute_log_nuclei_provenance "$target_url"
+
             _print_msg INFO "Running: wp-brute-pro recon on ${target_url}"
             if ! _wp_brute_run_recon "$target_url" "$out_dir"; then
                 log_note "wp_brute_pro: recon failed for ${target_url}" "${FUNCNAME[0]}" "${LINENO}"
                 continue
             fi
 
+            if ! _wp_brute_scan_is_wordpress "$scan_json_rel"; then
+                log_note "wp_brute_pro: skipping ${target_url} (recon: not WordPress — no xmlrpc/login/wp version)" "${FUNCNAME[0]}" "${LINENO}"
+                continue
+            fi
+
             users_csv=$(jq -r '[.users[]?.slug // empty] | join(",")' "$scan_json_rel" 2>/dev/null)
+            local nuclei_users_csv=""
+            if [[ -z "$users_csv" && ${WP_BRUTE_NUCLEI_USERS_FALLBACK:-true} == true ]]; then
+                nuclei_users_csv=$(_wp_brute_nuclei_users_csv "$target_url" 2>/dev/null || true)
+                if [[ -n "$nuclei_users_csv" ]]; then
+                    users_csv="$nuclei_users_csv"
+                    _print_msg INFO "wp_brute_pro: using nuclei wp-user-enum usernames for ${target_url}: ${users_csv}"
+                fi
+            fi
             if [[ -z "$users_csv" ]]; then
-                log_note "wp_brute_pro: Scanner found no users in ${scan_json_rel} for ${target_url}" "${FUNCNAME[0]}" "${LINENO}"
+                log_note "wp_brute_pro: no users (Scanner + nuclei wp-user-enum) for ${target_url}" "${FUNCNAME[0]}" "${LINENO}"
                 continue
             fi
             local wp_version xmlrpc_status waf_name
@@ -1248,7 +1345,7 @@ function wp_brute_pro() {
 
             local wordlist_count
             wordlist_count=$(wc -l <"$attack_wordlist" | tr -d ' ')
-            _print_msg INFO "Running: wp-brute hybrid spray on ${target_url} (${wordlist_count} priority + smart generation, users from scan.json: ${users_csv})"
+            _print_msg INFO "Running: wp-brute hybrid spray on ${target_url} (${wordlist_count} priority passwords + smart generation, users: ${users_csv})"
             _wp_brute_run_hybrid_spray "$target_url" "$out_dir" "$attack_wordlist" "$company_name" >>"$LOGFILE" 2>&1 || true
 
             if [[ -s "${out_dir}/found.txt" ]]; then
