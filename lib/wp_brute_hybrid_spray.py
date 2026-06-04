@@ -29,6 +29,11 @@ def parse_args():
     p.add_argument("--proxy-list", help="Proxy list file")
     p.add_argument("--export-json", help="Export results JSON path")
     p.add_argument("--resume", action="store_true")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build and save wordlist only (no attack)",
+    )
     p.add_argument("--lang", default="en", help="wp-brute-pro UI language")
     p.add_argument("-v", "--verbose", action="store_true", help="Colored TUI with progress bar")
     p.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
@@ -302,6 +307,28 @@ def main():
     if not passwords:
         say(args.verbose, wp_ui, None, "error", "No passwords to try")
         return 2
+
+    wordlist_file = os.path.join(out_dir, "wordlist.txt")
+    with open(wordlist_file, "w", encoding="utf-8") as handle:
+        for pwd in passwords:
+            handle.write(pwd + "\n")
+    reporter.info(f"Full spray wordlist ({len(passwords)} lines): {wordlist_file}")
+    if args.verbose:
+        wp_ui.success(f"Wordlist saved: {wordlist_file} ({len(passwords)} lines)")
+
+    if args.dry_run:
+        priority_file = os.path.join(out_dir, "priority_wordlist.txt")
+        with open(priority_file, "w", encoding="utf-8") as handle:
+            for pwd in priority:
+                handle.write(pwd + "\n")
+        say(
+            args.verbose,
+            wp_ui,
+            reporter,
+            "info",
+            f"Priority-only list ({len(priority)} lines): {priority_file}",
+        )
+        return 0
 
     tracker = Tracker(out_dir)
     throttle = Throttle(args.delay, args.batch_size)
