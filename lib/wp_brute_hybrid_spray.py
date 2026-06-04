@@ -76,10 +76,23 @@ def merge_password_lists(priority, generated, max_passwords):
 
 
 def load_scan_json(path):
-    if not path or not os.path.isfile(path):
+    if not path:
+        return None
+    if not os.path.isabs(path):
+        path = os.path.abspath(path)
+    if not os.path.isfile(path):
         return None
     with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        data = json.load(handle)
+    return data if isinstance(data, dict) else None
+
+
+def as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 def save_scan_json(path, scan_info):
@@ -158,12 +171,15 @@ def display_phase1(scan_info, verbose, ui_mod, t_fn):
 
 def resolve_method(requested, scan_info, verbose, ui_mod, t_fn):
     method = requested
+    xmlrpc_active = scan_info and as_bool(scan_info.get("xmlrpc_active"))
+    login_url = scan_info.get("login_url") if scan_info else None
+
     if method == "auto":
-        if scan_info and scan_info.get("xmlrpc_active"):
+        if xmlrpc_active:
             method = "xmlrpc"
             if verbose and ui_mod:
                 ui_mod.success(t_fn("strategy_xmlrpc"))
-        elif scan_info and scan_info.get("login_url"):
+        elif login_url:
             method = "wplogin"
             if verbose and ui_mod:
                 ui_mod.info(t_fn("strategy_wplogin"))
@@ -176,7 +192,7 @@ def resolve_method(requested, scan_info, verbose, ui_mod, t_fn):
         scan_info
         and scan_info.get("has_captcha")
         and method == "wplogin"
-        and scan_info.get("xmlrpc_active")
+        and xmlrpc_active
     ):
         if verbose and ui_mod:
             ui_mod.warning(t_fn("strategy_captcha_switch"))
@@ -275,6 +291,9 @@ def main():
         return 2
 
     if args.verbose:
+        if args.no_scan:
+            wp_ui.header(t("phase1"))
+            wp_ui.info(f"Loaded recon from {args.scan_json}")
         display_phase1(scan_info, args.verbose, wp_ui, t)
 
     usernames = merge_users(usernames, scan_info, args.verbose, wp_ui, t)
@@ -286,6 +305,12 @@ def main():
         wp_ui.header(t("phase2"))
 
     method = resolve_method(args.method, scan_info, args.verbose, wp_ui, t)
+    reporter.info(
+        "Strategy from scan.json: "
+        f"xmlrpc_active={scan_info.get('xmlrpc_active')}, "
+        f"login_url={scan_info.get('login_url') or 'none'}, "
+        f"method={method}"
+    )
     if args.verbose:
         wp_ui.info(f"{t('stat_method')}: {method}")
         if proxy_rotator.has_proxies():

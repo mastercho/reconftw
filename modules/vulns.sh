@@ -1067,20 +1067,16 @@ _wp_brute_safe_dirname() {
     echo "$1" | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's|:|_|g' -e 's/[^a-zA-Z0-9._-]/_/g'
 }
 
-# Parse osint/passwords.txt (LeakSearch table: user@domain password) -> password list;
-# optional username list (email local-parts only, not WordPress slugs).
-# Usage: _wp_brute_parse_osint_leaks <passwords_out> [usernames_out]
+# Parse osint/passwords.txt (LeakSearch table: user@domain password) -> password list only.
+# Usage: _wp_brute_parse_osint_leaks <passwords_out>
 _wp_brute_parse_osint_leaks() {
     local passwords_out="$1"
-    local usernames_out="${2:-}"
     local osint_file="osint/passwords.txt"
-    local include_users=false
 
     [[ ${WP_BRUTE_USE_OSINT_PASSWORDS:-true} == true ]] || return 1
     [[ -s "$osint_file" ]] || return 1
-    [[ ${WP_BRUTE_USE_OSINT_USERNAMES:-false} == true && -n "$usernames_out" ]] && include_users=true
 
-    awk -v domain="$domain" -v include_users="$include_users" '
+    awk -v domain="$domain" '
     function domain_match(email,   d) {
         d = tolower(domain)
         return (tolower(email) ~ ("@" d "$"))
@@ -1095,106 +1091,13 @@ _wp_brute_parse_osint_leaks() {
         if (email !~ /@/ || pwd == "" || pwd ~ /^-+$/ ) next
         if (domain != "" && !domain_match(email)) next
         print pwd
-        if (include_users == "true") {
-            split(email, parts, "@")
-            user = parts[1]
-            gsub(/[^a-zA-Z0-9._-]/, "", user)
-            if (user != "") print user
-        }
     }' "$osint_file" >"${passwords_out}.raw" 2>/dev/null || return 1
 
     [[ ! -s "${passwords_out}.raw" ]] && return 1
 
     awk 'NF { print $1 }' "${passwords_out}.raw" | grep -aE '.+' | anew -q "$passwords_out"
-    if [[ "$include_users" == true ]]; then
-        awk 'NF { print $1 }' "${passwords_out}.raw" | grep -aE '^[a-zA-Z0-9._-]+$' | anew -q "$usernames_out"
-    elif [[ -n "$usernames_out" ]]; then
-        : >"$usernames_out"
-    fi
     rm -f "${passwords_out}.raw"
     [[ -s "$passwords_out" ]]
-}
-
-# Build url -> username map from nuclei wp-user-* extracted-results.
-_wp_brute_collect_nuclei_users() {
-    : >".tmp/wp_brute_nuclei_users.tsv"
-
-    local json_file
-    if [[ ! -d nuclei_output ]]; then
-        return 0
-    fi
-
-    for json_file in nuclei_output/*_json.txt nuclei_output/dast_json.txt; do
-        [[ -s "$json_file" ]] || continue
-        jq -r '
-            select((."template-id" // "" | test("(?i)wp-user"))) |
-            (.["matched-at"] // .host // empty) as $m |
-            (.["extracted-results"] // [])[]? |
-            select(. != null and (. | tostring | length) > 0) |
-            [$m, (. | tostring)] | @tsv
-        ' "$json_file" 2>/dev/null >>".tmp/wp_brute_nuclei_users.tsv"
-    done
-}
-
-# Comma-separated WordPress usernames from nuclei for one target base URL.
-_wp_brute_nuclei_users_csv() {
-    local target_url="$1"
-    local base_url
-
-    base_url=$(_wp_brute_base_url "$target_url")
-    [[ -n "$base_url" && -s ".tmp/wp_brute_nuclei_users.tsv" ]] || return 1
-
-    awk -F'\t' -v base="$base_url" '
-    function norm(u) {
-        sub(/\r$/, "", u)
-        sub(/\/$/, "", u)
-        sub(/:443$/, "", u)
-        sub(/:80$/, "", u)
-        return tolower(u)
-    }
-    norm($1) == norm(base) {
-        user = $2
-        gsub(/[^a-zA-Z0-9._-]/, "", user)
-        if (user != "") print user
-    }' ".tmp/wp_brute_nuclei_users.tsv" | sort -u | paste -sd, -
-}
-
-# True when nuclei already matched an xmlrpc-related template on this host.
-_wp_brute_nuclei_has_xmlrpc() {
-    local target_url="$1"
-    local base_url json_file
-
-    base_url=$(_wp_brute_base_url "$target_url")
-    [[ -n "$base_url" && -d nuclei_output ]] || return 1
-
-    for json_file in nuclei_output/*_json.txt nuclei_output/dast_json.txt; do
-        [[ -s "$json_file" ]] || continue
-        if jq -e --arg base "$base_url" '
-            def norm: gsub("\\r$"; "") | sub("/$"; "") | sub(":443$"; "") | sub(":80$"; "") | ascii_downcase;
-            select((."template-id" // "" | test("(?i)xmlrpc"))) |
-            ((.["matched-at"] // .host // "") | norm) as $m |
-            ($base | norm) as $b |
-            select($m == $b)
-        ' "$json_file" >/dev/null 2>&1; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-_wp_brute_merge_user_csv() {
-    local merged=""
-    local part
-    for part in "$@"; do
-        [[ -n "$part" ]] || continue
-        if [[ -n "$merged" ]]; then
-            merged="${merged},${part}"
-        else
-            merged="$part"
-        fi
-    done
-    [[ -n "$merged" ]] || return 1
-    echo "$merged" | tr ',' '\n' | sed '/^$/d' | sort -u | paste -sd, -
 }
 
 # Merge short wordlist + optional osint leak passwords for wp-brute-pro spray.
@@ -1206,7 +1109,7 @@ _wp_brute_build_attack_wordlist() {
     : >"$dest"
     [[ -s "$base_list" ]] && cat "$base_list" | sed 's/\r$//' | anew -q "$dest"
 
-    if _wp_brute_parse_osint_leaks ".tmp/wp_brute_osint_passwords.txt" ".tmp/wp_brute_osint_users.txt"; then
+    if _wp_brute_parse_osint_leaks ".tmp/wp_brute_osint_passwords.txt"; then
         cat ".tmp/wp_brute_osint_passwords.txt" | anew -q "$dest"
         _print_msg INFO "Merged $(wc -l <".tmp/wp_brute_osint_passwords.txt" | tr -d ' ') password(s) from osint/passwords.txt"
     fi
@@ -1219,24 +1122,21 @@ _wp_brute_build_attack_wordlist() {
 _wp_brute_run_hybrid_spray() {
     local target_url="$1"
     local out_dir="$2"
-    local users_csv="$3"
-    local attack_wordlist="$4"
-    local company_name="$5"
-    local spray_method="${6:-${WP_BRUTE_METHOD:-auto}}"
+    local attack_wordlist="$3"
+    local company_name="$4"
+    local scan_json_rel="vulns/wp_brute/$(_wp_brute_safe_dirname "$target_url")/scan.json"
     local py_bin="${tools}/wp-brute-pro/venv/bin/python3"
     local tool_root="${tools}/wp-brute-pro"
     local spray_script="${SCRIPTPATH}/lib/wp_brute_hybrid_spray.py"
 
-    [[ -x "$py_bin" && -f "$spray_script" && -s "$attack_wordlist" ]] || return 1
-    [[ -n "$users_csv" ]] || return 1
+    [[ -x "$py_bin" && -f "$spray_script" && -s "$attack_wordlist" && -s "$scan_json_rel" ]] || return 1
 
     local -a spray_cmd=(
         "$py_bin" "$spray_script"
         -u "$target_url"
-        -U "$users_csv"
         --priority-wordlist "$attack_wordlist"
-        --scan-json "${out_dir}/scan.json"
-        --method "$spray_method"
+        --scan-json "$scan_json_rel"
+        --method "${WP_BRUTE_METHOD:-auto}"
         --batch-size "${WP_BRUTE_BATCH_SIZE:-50}"
         --delay "${WP_BRUTE_DELAY:-3}"
         --max-passwords "${WP_BRUTE_MAX_PASSWORDS:-0}"
@@ -1308,7 +1208,7 @@ function wp_brute_pro() {
 
         start_func "${FUNCNAME[0]}" "WordPress recon/brute (wp-brute-pro)"
 
-        local target_url users_csv company_name host_key out_dir summary_file attack_wordlist osint_users_csv
+        local target_url users_csv company_name host_key out_dir summary_file attack_wordlist scan_json_rel
         : >"vulns/wp_brute/summary.txt"
         summary_file="vulns/wp_brute/summary.txt"
 
@@ -1318,17 +1218,13 @@ function wp_brute_pro() {
         fi
         attack_wordlist=".tmp/wp_brute_attack_wordlist.txt"
 
-        if [[ -s ".tmp/wp_brute_osint_users.txt" ]]; then
-            osint_users_csv=$(paste -sd, ".tmp/wp_brute_osint_users.txt" 2>/dev/null || true)
-        fi
-        _wp_brute_collect_nuclei_users
-
         company_name="${domain%%.*}"
 
         while IFS= read -r target_url; do
             [[ -z "$target_url" ]] && continue
             host_key=$(_wp_brute_safe_dirname "$target_url")
             out_dir="${dir}/vulns/wp_brute/${host_key}"
+            scan_json_rel="vulns/wp_brute/${host_key}/scan.json"
             mkdir -p "$out_dir"
 
             _print_msg INFO "Running: wp-brute-pro recon on ${target_url}"
@@ -1337,33 +1233,23 @@ function wp_brute_pro() {
                 continue
             fi
 
-            users_csv=$(jq -r '[.users[]?.slug // empty] | join(",")' "${out_dir}/scan.json" 2>/dev/null)
-            local nuclei_users_csv spray_method="${WP_BRUTE_METHOD:-auto}"
-            nuclei_users_csv=$(_wp_brute_nuclei_users_csv "$target_url" 2>/dev/null || true)
-            users_csv=$(_wp_brute_merge_user_csv "$users_csv" "$nuclei_users_csv" "$osint_users_csv" 2>/dev/null || true)
+            users_csv=$(jq -r '[.users[]?.slug // empty] | join(",")' "$scan_json_rel" 2>/dev/null)
             if [[ -z "$users_csv" ]]; then
-                log_note "wp_brute_pro: no usernames for ${target_url} (scan.json, nuclei wp-user-enum, osint)" "${FUNCNAME[0]}" "${LINENO}"
+                log_note "wp_brute_pro: Scanner found no users in ${scan_json_rel} for ${target_url}" "${FUNCNAME[0]}" "${LINENO}"
                 continue
             fi
-            if [[ -n "$nuclei_users_csv" ]]; then
-                _print_msg INFO "wp_brute_pro: nuclei wp-user usernames for ${target_url}: ${nuclei_users_csv}"
-            fi
-            if [[ "$spray_method" == "auto" ]] && _wp_brute_nuclei_has_xmlrpc "$target_url"; then
-                spray_method="xmlrpc"
-                _print_msg INFO "wp_brute_pro: nuclei xmlrpc hit on ${target_url}, using method xmlrpc"
-            fi
             local wp_version xmlrpc_status waf_name
-            wp_version=$(jq -r '.wp_version // "unknown"' "${out_dir}/scan.json" 2>/dev/null)
-            xmlrpc_status=$([[ $(jq -r '.xmlrpc_active // false' "${out_dir}/scan.json" 2>/dev/null) == "true" ]] && echo active || echo disabled)
-            waf_name=$(jq -r '.waf_name // "none"' "${out_dir}/scan.json" 2>/dev/null)
+            wp_version=$(jq -r '.wp_version // "unknown"' "$scan_json_rel" 2>/dev/null)
+            xmlrpc_status=$([[ $(jq -r '.xmlrpc_active // false' "$scan_json_rel" 2>/dev/null) == "true" ]] && echo active || echo disabled)
+            waf_name=$(jq -r '.waf_name // "none"' "$scan_json_rel" 2>/dev/null)
             printf '%s | users=%s | wp=%s | xmlrpc=%s | waf=%s\n' \
-                "$target_url" "${users_csv:-auto}" "$wp_version" "$xmlrpc_status" "$waf_name" \
+                "$target_url" "$users_csv" "$wp_version" "$xmlrpc_status" "$waf_name" \
                 | anew -q "$summary_file"
 
             local wordlist_count
             wordlist_count=$(wc -l <"$attack_wordlist" | tr -d ' ')
-            _print_msg INFO "Running: wp-brute hybrid spray on ${target_url} (${wordlist_count} priority + smart generation, users: ${users_csv})"
-            _wp_brute_run_hybrid_spray "$target_url" "$out_dir" "$users_csv" "$attack_wordlist" "$company_name" "$spray_method" >>"$LOGFILE" 2>&1 || true
+            _print_msg INFO "Running: wp-brute hybrid spray on ${target_url} (${wordlist_count} priority + smart generation, users from scan.json: ${users_csv})"
+            _wp_brute_run_hybrid_spray "$target_url" "$out_dir" "$attack_wordlist" "$company_name" >>"$LOGFILE" 2>&1 || true
 
             if [[ -s "${out_dir}/found.txt" ]]; then
                 cat "${out_dir}/found.txt" | anew -q "vulns/wp_brute/found.txt"
