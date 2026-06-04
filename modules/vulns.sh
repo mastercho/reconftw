@@ -1151,6 +1151,8 @@ _wp_brute_run_hybrid_spray() {
         --output "$out_dir"
         --tool-root "$tool_root"
         --export-json "${out_dir}/reconftw_export.json"
+        --no-scan
+        --lang "${WP_BRUTE_LANG:-en}"
         -v
     )
     [[ -n "$company_name" ]] && spray_cmd+=(--company "$company_name")

