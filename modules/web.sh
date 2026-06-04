@@ -829,6 +829,8 @@ function portscan() {
             fi
         fi
 
+        _feed_port_discovery_urls
+
         if [[ -s "hosts/webs.txt" ]]; then
             if ! NUMOFLINES=$(wc -l <hosts/webs.txt); then
                 print_warnf "Failed to count lines in hosts/webs.txt."
@@ -850,6 +852,82 @@ function portscan() {
         fi
     fi
 
+}
+
+# Turn ip:port lines (smap/naabu/etc.) into http(s) URLs for nuclei and webs/hosts lists.
+# Usage: _append_ip_port_file_as_urls <file>
+_append_ip_port_file_as_urls() {
+    local infile="$1"
+    [[ ! -s "$infile" ]] && return 0
+
+    awk '
+    function emit(ip, port) {
+        if (ip !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) return
+        if (port !~ /^[0-9]+$/ || port + 0 < 1 || port + 0 > 65535) return
+        if (port == 443 || port == 8443) printf "https://%s:%s\n", ip, port
+        else if (port == 80) printf "http://%s\n", ip
+        else printf "http://%s:%s\n", ip, port
+    }
+    {
+        line = $0
+        sub(/\r$/, "", line)
+        if (line ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+$/) {
+            split(line, a, ":")
+            emit(a[1], a[2])
+            next
+        }
+        ip = ""
+        port = ""
+        for (i = 1; i <= NF; i++) {
+            if ($i ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) ip = $i
+            else if ($i ~ /^[0-9]+$/ && $i + 0 == $i) port = $i
+        }
+        if (ip != "" && port != "") emit(ip, port)
+    }' "$infile" | anew -q hosts/webs.txt
+}
+
+# Open ports from nmap gnmap -> http(s) URLs (fallback when nmapurls XML path is empty).
+# Usage: _append_gnmap_open_ports_as_urls <gnmap_file>
+_append_gnmap_open_ports_as_urls() {
+    local gnmap="$1"
+    [[ ! -s "$gnmap" ]] && return 0
+
+    awk '
+    /^Host: / {
+        host = $2
+        if (host !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) next
+        ports = $0
+        sub(/^.*Ports: /, "", ports)
+        n = split(ports, arr, ",")
+        for (i = 1; i <= n; i++) {
+            gsub(/^ +| +$/, "", arr[i])
+            split(arr[i], f, "/")
+            if (f[2] == "open" && f[1] ~ /^[0-9]+$/) {
+                port = f[1]
+                if (port == 443 || port == 8443) printf "https://%s:%s\n", host, port
+                else if (port == 80) printf "http://%s\n", host
+                else printf "http://%s:%s\n", host, port
+            }
+        }
+    }' "$gnmap" | anew -q hosts/webs.txt
+}
+
+# Merge passive/active port discovery into hosts/webs.txt for nuclei.
+_feed_port_discovery_urls() {
+    _append_ip_port_file_as_urls "hosts/portscan_passive.txt"
+    _append_ip_port_file_as_urls "hosts/naabu_open.txt"
+    _append_gnmap_open_ports_as_urls "hosts/portscan_active.gnmap"
+    _append_gnmap_open_ports_as_urls "hosts/portscan_active_targeted.gnmap"
+    if [[ -s hosts/webs.txt ]]; then
+        cat hosts/webs.txt | anew -q webs/webs.txt
+    fi
+}
+
+# Build .tmp/webs_subs.txt for nuclei (always refreshed; includes portscan URLs in hosts/webs.txt).
+_build_nuclei_target_list() {
+    _feed_port_discovery_urls
+    cat subdomains/subdomains.txt webs/webs_all.txt hosts/webs.txt 2>>"$LOGFILE" \
+        | sed '/^$/d' | sort -u >.tmp/webs_subs.txt
 }
 
 _build_service_fp_targets_from_nmap() {
@@ -1149,11 +1227,8 @@ function nuclei_check() {
 
         ensure_webs_all || true
 
-        # Combine subdomain, web, IP, and portscan-derived targets for nuclei
-        if [[ ! -s ".tmp/webs_subs.txt" ]]; then
-            cat subdomains/subdomains.txt webs/webs_all.txt .tmp/ips_nocdn.txt hosts/webs.txt 2>>"$LOGFILE" \
-                | sed '/^$/d' | sort -u >.tmp/webs_subs.txt
-        fi
+        # Subdomains, probed webs, and http(s)://ip:port targets from port scans (hosts/webs.txt)
+        _build_nuclei_target_list
 
         # Prepare WAF-aware lists and run scans
         _nuclei_prepare_waf_lists
