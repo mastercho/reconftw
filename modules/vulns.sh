@@ -1041,48 +1041,24 @@ _wp_brute_base_url() {
     [[ -n "$raw" ]] && printf '%s\n' "$raw"
 }
 
-# Collect WordPress targets from nuclei JSON/text, CMSeeK output, and optional seed URLs.
+# Collect WordPress targets from nuclei JSON only (wordpress / wp-* / xmlrpc templates).
 _wp_brute_collect_targets() {
     : >".tmp/wp_brute_targets.txt"
 
-    local json_file crit
-    if [[ -d nuclei_output ]]; then
-        for json_file in nuclei_output/*_json.txt nuclei_output/dast_json.txt; do
-            [[ -s "$json_file" ]] || continue
-            jq -r '
-                select((."template-id" // "" | test("(?i)(wordpress|wp-user|wp-login|wp-xmlrpc|xmlrpc|wp-config|wp-json)"))) |
-                (.["matched-at"] // .host // empty)
-            ' "$json_file" 2>/dev/null | while IFS= read -r line; do
-                _wp_brute_base_url "$line" | anew -q ".tmp/wp_brute_targets.txt"
-            done
-        done
-        for crit in info low medium high critical; do
-            [[ -s "nuclei_output/${crit}.txt" ]] || continue
-            grep -aiE 'wordpress|wp-user|wp-login|xmlrpc' "nuclei_output/${crit}.txt" 2>/dev/null \
-                | awk '{print $NF}' | while IFS= read -r line; do
-                    _wp_brute_base_url "$line" | anew -q ".tmp/wp_brute_targets.txt"
-                done
-        done
+    local json_file
+    if [[ ! -d nuclei_output ]]; then
+        return 0
     fi
 
-    if [[ -d cms ]]; then
-        while IFS= read -r cms_json; do
-            [[ -s "$cms_json" ]] || continue
-            local cms_id cms_url
-            cms_id=$(jq -r 'try .cms_id // empty' "$cms_json" 2>/dev/null)
-            cms_url=$(jq -r 'try .url // empty' "$cms_json" 2>/dev/null)
-            [[ "$cms_id" =~ [Ww]ord[Pp]ress ]] || continue
-            _wp_brute_base_url "$cms_url" | anew -q ".tmp/wp_brute_targets.txt"
-        done < <(find cms -type f -name 'cms.json' 2>/dev/null)
-    fi
-
-    if [[ -n "${WP_BRUTE_SEED_URLS:-}" ]]; then
-        local seed
-        IFS=',' read -ra _wp_seeds <<<"$WP_BRUTE_SEED_URLS"
-        for seed in "${_wp_seeds[@]}"; do
-            _wp_brute_base_url "$seed" | anew -q ".tmp/wp_brute_targets.txt"
+    for json_file in nuclei_output/*_json.txt nuclei_output/dast_json.txt; do
+        [[ -s "$json_file" ]] || continue
+        jq -r '
+            select((."template-id" // "" | test("(?i)(^wordpress|^wp-|-wp-|xmlrpc|wp-user|wp-login)"))) |
+            (.["matched-at"] // .host // empty)
+        ' "$json_file" 2>/dev/null | while IFS= read -r line; do
+            _wp_brute_base_url "$line" | anew -q ".tmp/wp_brute_targets.txt"
         done
-    fi
+    done
 
     sort -u ".tmp/wp_brute_targets.txt" -o ".tmp/wp_brute_targets.txt" 2>/dev/null || true
 }
@@ -1117,7 +1093,7 @@ PY
 
 function wp_brute_pro() {
 
-    if ! ensure_dirs .tmp vulns/wp_brute nuclei_output cms; then return 1; fi
+    if ! ensure_dirs .tmp vulns/wp_brute nuclei_output; then return 1; fi
 
     if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ ${WP_BRUTE:-true} == true ]] \
         && ! [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -1139,7 +1115,7 @@ function wp_brute_pro() {
         local target_count
         target_count=$(wc -l <".tmp/wp_brute_targets.txt" | tr -d ' ')
         if [[ $DEEP != true ]] && [[ "$target_count" -gt "${WP_BRUTE_MAX_TARGETS:-5}" ]]; then
-            end_func "Skipping wp_brute_pro: ${target_count} WordPress targets (limit ${WP_BRUTE_MAX_TARGETS:-5}, use --deep)." "${FUNCNAME[0]}"
+            end_func "Skipping wp_brute_pro: ${target_count} WordPress nuclei targets (limit ${WP_BRUTE_MAX_TARGETS:-5}, use --deep)." "${FUNCNAME[0]}"
             return 0
         fi
 
@@ -1147,14 +1123,19 @@ function wp_brute_pro() {
 
         local do_attack=false
         if [[ ${WP_BRUTE_ATTACK:-false} == true ]]; then
-            if [[ ${WP_BRUTE_ATTACK_DEEP_ONLY:-true} != true ]] || [[ $DEEP == true ]]; then
-                do_attack=true
-            fi
+            do_attack=true
         fi
 
-        local target_url users_csv company_name host_key out_dir summary_file
+        local target_url users_csv company_name host_key out_dir summary_file attack_wordlist attack_wordlist_count
         : >"vulns/wp_brute/summary.txt"
         summary_file="vulns/wp_brute/summary.txt"
+
+        attack_wordlist="${WP_BRUTE_WORDLIST:-${SCRIPTPATH}/data/wordlists/wp_brute_short.txt}"
+        if [[ ! -s "$attack_wordlist" ]]; then
+            attack_wordlist="${SCRIPTPATH}/data/wordlists/wp_brute_short.txt"
+        fi
+        attack_wordlist_count=$(wc -l <"$attack_wordlist" 2>/dev/null | tr -d ' ')
+        [[ -z "$attack_wordlist_count" || "$attack_wordlist_count" -eq 0 ]] && attack_wordlist_count="${WP_BRUTE_MAX_PASSWORDS:-50}"
 
         company_name="${WP_BRUTE_COMPANY:-}"
         if [[ -z "$company_name" ]]; then
@@ -1189,23 +1170,25 @@ function wp_brute_pro() {
             local -a brute_cmd=(
                 "$py_bin" "${tool_root}/wp_brute.py"
                 -u "$target_url"
-                --company "$company_name"
                 --method "${WP_BRUTE_METHOD:-auto}"
                 --batch-size "${WP_BRUTE_BATCH_SIZE:-50}"
                 --delay "${WP_BRUTE_DELAY:-3}"
-                --max-passwords "${WP_BRUTE_MAX_PASSWORDS:-500}"
+                --max-passwords "$attack_wordlist_count"
+                --wordlist "$attack_wordlist"
                 --output "$out_dir"
                 --export-json "${out_dir}/reconftw_export.json"
+                --no-scan
                 --no-color
                 --lang "${WP_BRUTE_LANG:-en}"
                 -v
             )
-            [[ ${WP_BRUTE_CRAWL:-true} == true ]] && brute_cmd+=(--crawl)
+            if [[ ${WP_BRUTE_CRAWL:-false} == true ]]; then
+                brute_cmd+=(--crawl --company "$company_name")
+            fi
             [[ -n "$users_csv" ]] && brute_cmd+=(-U "$users_csv")
-            [[ -n "${WP_BRUTE_WORDLIST:-}" && -s "${WP_BRUTE_WORDLIST}" ]] && brute_cmd+=(--wordlist "${WP_BRUTE_WORDLIST}")
             [[ -n "${WP_BRUTE_PROXY_LIST:-}" && -s "${WP_BRUTE_PROXY_LIST}" ]] && brute_cmd+=(--proxy-list "${WP_BRUTE_PROXY_LIST}")
 
-            _print_msg INFO "Running: wp-brute-pro attack on ${target_url} (users: ${users_csv:-auto})"
+            _print_msg INFO "Running: wp-brute-pro password spray on ${target_url} (users: ${users_csv:-auto}, wordlist: ${attack_wordlist})"
             run_command "${brute_cmd[@]}" >>"$LOGFILE" 2>&1 || true
 
             if [[ -s "${out_dir}/found.txt" ]]; then
