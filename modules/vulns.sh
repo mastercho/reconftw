@@ -1151,6 +1151,7 @@ _wp_brute_run_hybrid_spray() {
         --output "$out_dir"
         --tool-root "$tool_root"
         --export-json "${out_dir}/reconftw_export.json"
+        -v
     )
     [[ -n "$company_name" ]] && spray_cmd+=(--company "$company_name")
     [[ ${WP_BRUTE_CRAWL:-true} == true ]] && spray_cmd+=(--crawl)
