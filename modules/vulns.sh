@@ -1041,7 +1041,8 @@ _wp_brute_base_url() {
     [[ -n "$raw" ]] && printf '%s\n' "$raw"
 }
 
-# Collect WordPress targets from nuclei JSON (strict template ids; avoids Laravel/generic -wp- noise).
+# Collect WordPress spray targets from nuclei (wp-user-enum / login / xmlrpc only).
+# Excludes wordpress-eol and other weak tech-detect hits on non-WP stacks (e.g. Laravel).
 _wp_brute_collect_targets() {
     : >".tmp/wp_brute_targets.txt"
 
@@ -1051,9 +1052,9 @@ _wp_brute_collect_targets() {
     fi
 
     for json_file in nuclei_output/*_json.txt nuclei_output/dast_json.txt; do
-        [[ -s "$json_file" ]] || continue
+        [[ -f "$json_file" && -s "$json_file" ]] || continue
         jq -r '
-            select((."template-id" // "" | test("(?i)(^wordpress|wp-user|wp-login|xmlrpc)"))) |
+            select((."template-id" // "" | test("(?i)(wp-user|wp-login|xmlrpc)"))) |
             (.["matched-at"] // .host // empty)
         ' "$json_file" 2>/dev/null | while IFS= read -r line; do
             _wp_brute_base_url "$line" | anew -q ".tmp/wp_brute_targets.txt"
@@ -1121,7 +1122,7 @@ _wp_brute_log_nuclei_provenance() {
             log_note "wp_brute_pro: nuclei template ${tid} matched ${target_url}" "${FUNCNAME[0]}" "${LINENO}"
         done < <(jq -r --arg base "$base_url" '
             def norm: gsub("\\r$"; "") | sub("/$"; "") | sub(":443$"; "") | sub(":80$"; "") | ascii_downcase;
-            select((."template-id" // "" | test("(?i)(^wordpress|wp-user|wp-login|xmlrpc)"))) |
+            select((."template-id" // "" | test("(?i)(wp-user|wp-login|xmlrpc)"))) |
             ((.["matched-at"] // .host // "") | norm) as $m |
             ($base | norm) as $b |
             select($m == $b) | ."template-id"
