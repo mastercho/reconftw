@@ -1178,33 +1178,21 @@ function wp_brute_pro() {
 
         start_func "${FUNCNAME[0]}" "WordPress recon/brute (wp-brute-pro)"
 
-        local do_attack=false
-        if [[ ${WP_BRUTE_ATTACK:-false} == true ]]; then
-            do_attack=true
-        fi
-
-        local target_url users_csv company_name host_key out_dir summary_file attack_wordlist attack_wordlist_count osint_users_csv
+        local target_url users_csv company_name host_key out_dir summary_file attack_wordlist osint_users_csv
         : >"vulns/wp_brute/summary.txt"
         summary_file="vulns/wp_brute/summary.txt"
 
         if ! _wp_brute_build_attack_wordlist ".tmp/wp_brute_attack_wordlist.txt"; then
-            _print_msg WARN "${FUNCNAME[0]}: no attack wordlist available (short list + osint passwords empty)"
-            if [[ "$do_attack" == true ]]; then
-                do_attack=false
-            fi
+            end_func "No spray wordlist (short list + osint/passwords.txt empty)." "${FUNCNAME[0]}" "SKIP_NOINPUT"
+            return 0
         fi
         attack_wordlist=".tmp/wp_brute_attack_wordlist.txt"
-        attack_wordlist_count=$(wc -l <"$attack_wordlist" 2>/dev/null | tr -d ' ')
-        [[ -z "$attack_wordlist_count" || "$attack_wordlist_count" -eq 0 ]] && attack_wordlist_count="${WP_BRUTE_MAX_PASSWORDS:-50}"
 
         if [[ -s ".tmp/wp_brute_osint_users.txt" ]]; then
             osint_users_csv=$(paste -sd, ".tmp/wp_brute_osint_users.txt" 2>/dev/null || true)
         fi
 
-        company_name="${WP_BRUTE_COMPANY:-}"
-        if [[ -z "$company_name" ]]; then
-            company_name="${domain%%.*}"
-        fi
+        company_name="${domain%%.*}"
 
         while IFS= read -r target_url; do
             [[ -z "$target_url" ]] && continue
@@ -1235,17 +1223,13 @@ function wp_brute_pro() {
                 "$target_url" "${users_csv:-auto}" "$wp_version" "$xmlrpc_status" "$waf_name" \
                 | anew -q "$summary_file"
 
-            if [[ "$do_attack" != true ]]; then
-                continue
-            fi
-
             local -a brute_cmd=(
                 "$py_bin" "${tool_root}/wp_brute.py"
                 -u "$target_url"
                 --method "${WP_BRUTE_METHOD:-auto}"
                 --batch-size "${WP_BRUTE_BATCH_SIZE:-50}"
                 --delay "${WP_BRUTE_DELAY:-3}"
-                --max-passwords "$attack_wordlist_count"
+                --max-passwords "${WP_BRUTE_MAX_PASSWORDS:-0}"
                 --wordlist "$attack_wordlist"
                 --output "$out_dir"
                 --export-json "${out_dir}/reconftw_export.json"
@@ -1254,7 +1238,7 @@ function wp_brute_pro() {
                 --lang "${WP_BRUTE_LANG:-en}"
                 -v
             )
-            if [[ ${WP_BRUTE_CRAWL:-false} == true ]]; then
+            if [[ ${WP_BRUTE_CRAWL:-true} == true ]]; then
                 brute_cmd+=(--crawl --company "$company_name")
             fi
             [[ -n "$users_csv" ]] && brute_cmd+=(-U "$users_csv")
@@ -1268,7 +1252,7 @@ function wp_brute_pro() {
             fi
         done <".tmp/wp_brute_targets.txt"
 
-        end_func "Results are saved in vulns/wp_brute/ (summary.txt, per-host scan.json, optional found.txt)" "${FUNCNAME[0]}"
+        end_func "Results are saved in vulns/wp_brute/ (summary.txt, scan.json, found.txt)" "${FUNCNAME[0]}"
     else
         if [[ ${WP_BRUTE:-true} == false ]]; then
             skip_notification "disabled"
