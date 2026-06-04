@@ -41,7 +41,7 @@ deep_wildcard_filter() {
         printf "%b[*] Running deep wildcard detection (max %d iterations)%b\n" "$bblue" "$max_iterations" "$reset"
 
     while [[ $wildcards_found -gt 0 ]] && [[ $iteration -lt $max_iterations ]]; do
-        ((iteration++))
+        iteration=$((iteration + 1))
         wildcards_found=0
 
         # Extract unique parent domains at each level

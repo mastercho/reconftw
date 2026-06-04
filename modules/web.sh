@@ -637,16 +637,16 @@ function portscan() {
                 | sort -u | anew -q .tmp/ips_nocdn.txt || true
         fi
 
-        # Optional CDN bypass to recover origin IPs.
+        # Optional CDN bypass to recover origin IPs (stdin = IPs, -h = site URL for Host header).
         if [[ ${CDN_BYPASS:-true} == true ]] && command -v hakoriginfinder >/dev/null 2>&1; then
-            : >".tmp/origin_input_hosts.txt"
-            if [[ -s "subdomains/subdomains.txt" ]]; then
-                cat subdomains/subdomains.txt | anew -q ".tmp/origin_input_hosts.txt"
-            elif [[ -s "webs/webs_all.txt" ]]; then
-                awk -F/ '{print $3}' webs/webs_all.txt | sed 's/:.*$//' | sed '/^$/d' | sort -u | anew -q ".tmp/origin_input_hosts.txt"
-            fi
-            if [[ -s ".tmp/origin_input_hosts.txt" ]]; then
-                if run_command hakoriginfinder <".tmp/origin_input_hosts.txt" >".tmp/hakoriginfinder_raw.txt" 2>>"$LOGFILE"; then
+            if [[ -s ".tmp/ips_nocdn.txt" ]]; then
+                local origin_probe_url="https://${domain}"
+                if [[ -s "webs/webs.txt" ]]; then
+                    origin_probe_url=$(head -n1 "webs/webs.txt" | sed 's/[[:space:]]*$//')
+                elif [[ -s "webs/webs_all.txt" ]]; then
+                    origin_probe_url=$(grep -aE '^https?://' "webs/webs_all.txt" | head -n1 | sed 's/[[:space:]]*$//')
+                fi
+                if run_command hakoriginfinder -h "$origin_probe_url" <".tmp/ips_nocdn.txt" >".tmp/hakoriginfinder_raw.txt" 2>>"$LOGFILE"; then
                     grep -aoE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' ".tmp/hakoriginfinder_raw.txt" \
                         | grep -aEiv "^(127|10|169\.254|172\.1[6-9]|172\.2[0-9]|172\.3[0-1]|192\.168)\." \
                         | sort -u >"hosts/origin_ips.txt"
@@ -754,7 +754,7 @@ function portscan() {
                         local naabu_ports_csv=""
                         naabu_ports_csv=$(cut -d':' -f2 "hosts/naabu_open.txt" | sed '/^$/d' | sort -un | paste -sd, -)
                         if [[ -n "$naabu_ports_csv" ]]; then
-                            run_command "$SUDO" nmap "${portscan_opts[@]}" -p "$naabu_ports_csv" -iL ".tmp/ips_nocdn.txt" -oA "hosts/portscan_active_targeted" 2>>"$LOGFILE" >/dev/null
+                            run_command ${SUDO:+$SUDO} nmap "${portscan_opts[@]}" -p "$naabu_ports_csv" -iL ".tmp/ips_nocdn.txt" -oA "hosts/portscan_active_targeted" 2>>"$LOGFILE" >/dev/null
                             used_targeted_output=true
                         fi
                     fi
@@ -769,7 +769,7 @@ function portscan() {
             if [[ "$used_targeted_output" != true ]]; then
                 if [[ $AXIOM != true ]]; then
                     if [[ -s ".tmp/ips_nocdn.txt" ]]; then
-                        run_command "$SUDO" nmap "${portscan_opts[@]}" -iL .tmp/ips_nocdn.txt -oA hosts/portscan_active 2>>"$LOGFILE"
+                        run_command ${SUDO:+$SUDO} nmap "${portscan_opts[@]}" -iL .tmp/ips_nocdn.txt -oA hosts/portscan_active 2>>"$LOGFILE"
                     fi
                 else
                     if [[ -s ".tmp/ips_nocdn.txt" ]]; then
@@ -787,7 +787,7 @@ function portscan() {
             fi
 
             if [[ $IPV6_SCAN == true && -s "hosts/ips_v6.txt" ]] && [[ $AXIOM != true ]]; then
-                run_command "$SUDO" nmap -6 "${portscan_opts[@]}" -iL hosts/ips_v6.txt -oA hosts/portscan_active_v6 2>>"$LOGFILE" >/dev/null
+                run_command ${SUDO:+$SUDO} nmap -6 "${portscan_opts[@]}" -iL hosts/ips_v6.txt -oA hosts/portscan_active_v6 2>>"$LOGFILE" >/dev/null
             fi
         fi
 
@@ -801,7 +801,7 @@ function portscan() {
                 read -r -a udp_opts <<<"$udp_opts_raw"
                 IFS="$_ifs"
             fi
-            run_command "$SUDO" nmap "${udp_opts[@]}" -iL ".tmp/ips_nocdn.txt" -oA "hosts/portscan_active_udp" 2>>"$LOGFILE" >/dev/null
+            run_command ${SUDO:+$SUDO} nmap "${udp_opts[@]}" -iL ".tmp/ips_nocdn.txt" -oA "hosts/portscan_active_udp" 2>>"$LOGFILE" >/dev/null
         elif [[ ${PORTSCAN_UDP:-false} == true ]] && [[ $AXIOM == true ]]; then
             _print_msg WARN "PORTSCAN_UDP is local-only for now; skipped in AXIOM mode."
         fi
@@ -1569,13 +1569,13 @@ function llm_probe() {
 
         start_func "${FUNCNAME[0]}" "LLM service probing (julius)"
 
-        local target_file="${dir}/.tmp/llm_probe_targets.txt"
-        local -a julius_cmd=(julius probe -f "$target_file" -o jsonl -q)
+        # julius -f/--file is skipped when stdin is a TTY; pipe targets on stdin instead.
+        local -a julius_cmd=(julius -o jsonl -q probe -)
         if [[ "${LLM_PROBE_AUGUSTUS:-false}" == "true" ]]; then
-            julius_cmd=(julius probe -f "$target_file" -o jsonl -q --augustus)
+            julius_cmd=(julius -o jsonl -q probe --augustus -)
         fi
 
-        run_command "${julius_cmd[@]}" >"webs/llm_probe.jsonl" 2>>"$LOGFILE" || true
+        run_command "${julius_cmd[@]}" <".tmp/llm_probe_targets.txt" >"webs/llm_probe.jsonl" 2>>"$LOGFILE" || true
         if [[ -s "webs/llm_probe.jsonl" ]]; then
             jq -r '[(.target // .url // "unknown"), (.provider // .service // "unknown"), (.probe // "n/a")] | @tsv' "webs/llm_probe.jsonl" 2>/dev/null \
                 | awk -F'\t' '{printf "%s [%s] [%s]\n", $1, $2, $3}' \
@@ -1808,6 +1808,15 @@ function cms_scanner() {
             return
         fi
 
+        local cmseek_result="${tools}/CMSeeK/Result"
+        if [[ -d "$cmseek_result" ]]; then
+            find "$cmseek_result" -type f -empty -delete 2>/dev/null || true
+            while IFS= read -r _bad_json; do
+                [[ -n "$_bad_json" ]] || continue
+                jq empty "$_bad_json" 2>/dev/null || rm -f "$_bad_json"
+            done < <(find "$cmseek_result" -type f -name '*.json' 2>/dev/null)
+        fi
+
         local _cms_target _cms_failures=0 _cms_ok=0
         while IFS= read -r _cms_target; do
             [[ -z "$_cms_target" ]] && continue
@@ -1819,14 +1828,14 @@ function cms_scanner() {
             run_with_heartbeat "cmseek ${_cms_target}" "${cmseek_cmd[@]}"
             local exit_status=$?
             if [[ ${exit_status} -ne 0 ]]; then
-                ((++_cms_failures))
+                _cms_failures=$((_cms_failures + 1))
                 if [[ ${exit_status} -eq 124 || ${exit_status} -eq 137 ]]; then
                     echo "TIMEOUT cmseek.py ${_cms_target} - investigate manually for $dir" >>"$LOGFILE"
                 else
                     echo "ERROR cmseek.py ${_cms_target} - investigate manually for $dir" >>"$LOGFILE"
                 fi
             else
-                ((++_cms_ok))
+                _cms_ok=$((_cms_ok + 1))
             fi
         done <".tmp/cms_targets.txt"
 
