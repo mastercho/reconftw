@@ -2222,16 +2222,8 @@ function s3buckets() {
             cloud_enum_status="WARN"
             cloud_enum_rc=1
         else
-            # cloud_enum can run several minutes with sparse output; heartbeat avoids "stuck" UI.
-            # Optional hard cap via CLOUD_ENUM_S3_TIMEOUT (e.g. 900 = 15m) when timeout(1) is available.
-            if [[ -n "${CLOUD_ENUM_S3_TIMEOUT:-}" && -n "${TIMEOUT_CMD:-}" ]]; then
-                run_with_heartbeat "cloud_enum" 30 \
-                    "$TIMEOUT_CMD" -k 30s "${CLOUD_ENUM_S3_TIMEOUT}" \
-                    "${cloud_enum_cmd[@]}" >>"$LOGFILE" 2>>"$LOGFILE" || cloud_enum_rc=$?
-            else
-                run_with_heartbeat "cloud_enum" 30 \
-                    "${cloud_enum_cmd[@]}" >>"$LOGFILE" 2>>"$LOGFILE" || cloud_enum_rc=$?
-            fi
+            run_with_heartbeat "cloud_enum" 30 \
+                "${cloud_enum_cmd[@]}" >>"$LOGFILE" 2>>"$LOGFILE" || cloud_enum_rc=$?
             if [[ $cloud_enum_rc -ne 0 ]]; then
                 cloud_enum_status="WARN"
                 print_warnf "cloud_enum command failed for domain %s (exit %s)." "$domain" "$cloud_enum_rc"
