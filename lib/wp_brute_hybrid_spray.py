@@ -308,26 +308,28 @@ def main():
         say(args.verbose, wp_ui, None, "error", "No passwords to try")
         return 2
 
+    priority_file = os.path.join(out_dir, "priority_wordlist.txt")
+    with open(priority_file, "w", encoding="utf-8") as handle:
+        for pwd in priority:
+            handle.write(pwd + "\n")
+
     wordlist_file = os.path.join(out_dir, "wordlist.txt")
     with open(wordlist_file, "w", encoding="utf-8") as handle:
         for pwd in passwords:
             handle.write(pwd + "\n")
+
+    reporter.info(f"Priority source: {args.priority_wordlist} ({len(priority)} lines -> {priority_file})")
     reporter.info(f"Full spray wordlist ({len(passwords)} lines): {wordlist_file}")
     if args.verbose:
-        wp_ui.success(f"Wordlist saved: {wordlist_file} ({len(passwords)} lines)")
+        wp_ui.success(f"Priority list: {priority_file} ({len(priority)} lines)")
+        wp_ui.success(f"Full wordlist: {wordlist_file} ({len(passwords)} lines)")
+        if priority:
+            preview = ", ".join(priority[:8])
+            if len(priority) > 8:
+                preview += ", ..."
+            wp_ui.info(f"First priority passwords: {preview}")
 
     if args.dry_run:
-        priority_file = os.path.join(out_dir, "priority_wordlist.txt")
-        with open(priority_file, "w", encoding="utf-8") as handle:
-            for pwd in priority:
-                handle.write(pwd + "\n")
-        say(
-            args.verbose,
-            wp_ui,
-            reporter,
-            "info",
-            f"Priority-only list ({len(priority)} lines): {priority_file}",
-        )
         return 0
 
     tracker = Tracker(out_dir)
