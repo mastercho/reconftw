@@ -923,10 +923,10 @@ _feed_port_discovery_urls() {
     fi
 }
 
-# Build .tmp/webs_subs.txt for nuclei (always refreshed; includes portscan URLs in hosts/webs.txt).
+# Build .tmp/webs_subs.txt for nuclei: hostnames, probed URLs, non-CDN IPs, and http(s)://ip:port from port scans.
 _build_nuclei_target_list() {
     _feed_port_discovery_urls
-    cat subdomains/subdomains.txt webs/webs_all.txt hosts/webs.txt 2>>"$LOGFILE" \
+    cat subdomains/subdomains.txt webs/webs_all.txt .tmp/ips_nocdn.txt hosts/webs.txt 2>>"$LOGFILE" \
         | sed '/^$/d' | sort -u >.tmp/webs_subs.txt
 }
 
@@ -1227,7 +1227,7 @@ function nuclei_check() {
 
         ensure_webs_all || true
 
-        # Subdomains, probed webs, and http(s)://ip:port targets from port scans (hosts/webs.txt)
+        # Hostnames, probed webs, .tmp/ips_nocdn.txt, and portscan URLs (hosts/webs.txt)
         _build_nuclei_target_list
 
         # Prepare WAF-aware lists and run scans
