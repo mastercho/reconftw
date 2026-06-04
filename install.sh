@@ -376,6 +376,7 @@ declare -A repos=(
     ["Gf-Patterns"]="1ndianl33t/Gf-Patterns"
     ["sus_params"]="g0ldencybersec/sus_params"
     ["CMSeeK"]="Tuhinshubhra/CMSeeK"
+    ["wp-brute-pro"]="umutsevimcann/wp-brute-pro"
     ["massdns"]="blechschmidt/massdns"
     ["testssl.sh"]="drwetter/testssl.sh"
     ["JSA"]="w9w/JSA"
@@ -642,6 +643,12 @@ function install_tools() {
                     uv venv venv &>/dev/null || true
                 fi
                 uv pip install --upgrade -r requirements.txt --python venv/bin/python3 &>/dev/null || true
+                ;;
+            "wp-brute-pro")
+                if [[ ! -d "venv" ]]; then
+                    uv venv venv &>/dev/null || true
+                fi
+                uv pip install --upgrade requests --python venv/bin/python3 &>/dev/null || true
                 ;;
         esac
 

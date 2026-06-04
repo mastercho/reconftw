@@ -1063,6 +1063,18 @@ SH
 
   cat > "$MOCK_BIN/julius" <<'SH'
 #!/usr/bin/env bash
+if [[ "$1" != "probe" ]]; then
+  echo "unexpected julius invocation: $*" >&2
+  exit 1
+fi
+shift
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -f) file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -s "${file:-}" ]] || { echo "no targets" >&2; exit 1; }
 printf '%s\n' '{"target":"https://llm.target.example.com","provider":"openai-compatible","probe":"chat-completions"}'
 SH
   chmod +x "$MOCK_BIN/julius"

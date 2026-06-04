@@ -3,11 +3,33 @@
 # reconFTW - Vulnerability scanning module
 # Contains: xss, ssrf_checks, crlf_checks, lfi, ssti,
 #           sqli, test_ssl, spraying, command_injection, 4xxbypass,
-#           smuggling, webcache, fuzzparams, nuclei_dast
+#           smuggling, webcache, fuzzparams, nuclei_dast, wp_brute_pro
 # This file is sourced by reconftw.sh - do not execute directly
 [[ -z "${SCRIPTPATH:-}" ]] && {
     echo "Error: This module must be sourced by reconftw.sh" >&2
     exit 1
+}
+
+# Build injectable URL list for sqlmap/commix/TInjA from gf output.
+# qsreplace -a emits FUZZ per parameter; fall back to raw parameterized URLs if needed.
+# Usage: _vulns_build_qsreplace_fuzz_list <source_gf_file> <dest_tmp_file>
+_vulns_build_qsreplace_fuzz_list() {
+    local src="$1"
+    local dest="$2"
+
+    : >"$dest"
+    [[ ! -s "$src" ]] && return 1
+
+    if command -v qsreplace >/dev/null 2>&1; then
+        qsreplace -a "FUZZ" <"$src" 2>>"$LOGFILE" | grep -a 'FUZZ' | sed 's/\r$//' | anew -q "$dest"
+    fi
+
+    if [[ ! -s "$dest" ]]; then
+        grep -aE '^https?://[^[:space:]]*\?[^[:space:]]*=' "$src" 2>/dev/null \
+            | sed 's/\r$//' | anew -q "$dest"
+    fi
+
+    [[ -s "$dest" ]]
 }
 
 function xss() {
@@ -254,7 +276,10 @@ function lfi() {
             _print_msg INFO "Running: LFI Payload Generation"
 
             # Process lfi.txt with qsreplace and filter lines containing 'FUZZ'
-            run_command qsreplace "FUZZ" <"gf/lfi.txt" | sed '/FUZZ/!d' | anew -q ".tmp/tmp_lfi.txt"
+            if ! _vulns_build_qsreplace_fuzz_list "gf/lfi.txt" ".tmp/tmp_lfi.txt"; then
+                end_func "LFI: no injectable query parameters in gf/lfi.txt after FUZZ prep." "${FUNCNAME[0]}" "SKIP_NOINPUT"
+                return 0
+            fi
 
             # Determine whether to proceed based on DEEP flag or number of URLs
             URL_COUNT=$(wc -l <".tmp/tmp_lfi.txt")
@@ -304,7 +329,10 @@ function ssti() {
             _print_msg INFO "Running: SSTI Payload Generation"
 
             # Process ssti.txt with qsreplace and filter lines containing 'FUZZ'
-            run_command qsreplace "FUZZ" <"gf/ssti.txt" | sed '/FUZZ/!d' | anew -q ".tmp/tmp_ssti.txt"
+            if ! _vulns_build_qsreplace_fuzz_list "gf/ssti.txt" ".tmp/tmp_ssti.txt"; then
+                end_func "SSTI: no injectable query parameters in gf/ssti.txt after FUZZ prep." "${FUNCNAME[0]}" "SKIP_NOINPUT"
+                return 0
+            fi
 
             # Determine whether to proceed based on DEEP flag or number of URLs
             URL_COUNT=$(wc -l <".tmp/tmp_ssti.txt")
@@ -408,7 +436,10 @@ function sqli() {
             _print_msg INFO "Running: SQLi Payload Generation"
 
             # Process sqli.txt with qsreplace and filter lines containing 'FUZZ'
-            run_command qsreplace "FUZZ" <"gf/sqli.txt" | sed '/FUZZ/!d' | anew -q ".tmp/tmp_sqli.txt"
+            if ! _vulns_build_qsreplace_fuzz_list "gf/sqli.txt" ".tmp/tmp_sqli.txt"; then
+                end_func "SQLi: no injectable query parameters in gf/sqli.txt after FUZZ prep (need URLs with ?param=)." "${FUNCNAME[0]}" "SKIP_NOINPUT"
+                return 0
+            fi
 
             # Determine whether to proceed based on DEEP flag or number of URLs
             URL_COUNT=$(wc -l <".tmp/tmp_sqli.txt")
@@ -581,14 +612,17 @@ function command_injection() {
             _print_msg INFO "Running: Command Injection Payload Generation"
 
             # Process rce.txt with qsreplace and filter lines containing 'FUZZ'
-            run_command qsreplace "FUZZ" <"gf/rce.txt" | sed '/FUZZ/!d' | anew -q ".tmp/tmp_rce.txt"
+            if ! _vulns_build_qsreplace_fuzz_list "gf/rce.txt" ".tmp/tmp_rce.txt"; then
+                end_func "Command injection: no injectable query parameters in gf/rce.txt after FUZZ prep." "${FUNCNAME[0]}" "SKIP_NOINPUT"
+                return 0
+            fi
 
             # Determine whether to proceed based on DEEP flag or number of URLs
             URL_COUNT=$(wc -l <".tmp/tmp_rce.txt")
             if [[ $DEEP == true ]] || [[ $URL_COUNT -le $DEEP_LIMIT ]]; then
 
-    # Run Commix if enabled
-    if [[ $COMMIX == true ]]; then
+    # Run Commix if enabled (COMM_INJ enables by default when COMMIX unset)
+    if [[ ${COMMIX:-$COMM_INJ} == true ]]; then
         _print_msg INFO "Running: Commix for Command Injection Checks"
         run_command commix --batch -m ".tmp/tmp_rce.txt" --output-dir "vulns/command_injection" 2>>"$LOGFILE" >/dev/null
     fi
@@ -895,6 +929,9 @@ _nuclei_dast_collect_targets() {
     if [[ -s "webs/webs_all.txt" ]]; then
         grep -aE '^https?://' "webs/webs_all.txt" | anew -q ".tmp/nuclei_dast_targets.txt"
     fi
+    if [[ -s "hosts/webs.txt" ]]; then
+        grep -aE '^https?://' "hosts/webs.txt" | anew -q ".tmp/nuclei_dast_targets.txt"
+    fi
     if [[ -s "webs/url_extract_nodupes.txt" ]]; then
         grep -aE '^https?://' "webs/url_extract_nodupes.txt" | anew -q ".tmp/nuclei_dast_targets.txt"
     fi
@@ -981,6 +1018,207 @@ function nuclei_dast() {
     else
         if [[ "$dast_enabled" == false ]]; then
             skip_notification "disabled"
+        else
+            skip_notification "processed"
+        fi
+    fi
+}
+
+# Normalize a nuclei/cms URL to a WordPress site root (scheme + host[:port]).
+_wp_brute_base_url() {
+    local raw="${1:-}"
+    raw="${raw//$'\r'/}"
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    [[ -z "$raw" ]] && return 1
+
+    if [[ ! "$raw" =~ ^https?:// ]]; then
+        raw="https://${raw}"
+    fi
+
+    raw=$(echo "$raw" | sed -E 's|^([a-zA-Z][a-zA-Z0-9+.-]*://[^/?#]+).*|\1|')
+    raw=$(echo "$raw" | sed -E 's|:443$||; s|:80$||')
+    [[ -n "$raw" ]] && printf '%s\n' "$raw"
+}
+
+# Collect WordPress targets from nuclei JSON/text, CMSeeK output, and optional seed URLs.
+_wp_brute_collect_targets() {
+    : >".tmp/wp_brute_targets.txt"
+
+    local json_file crit
+    if [[ -d nuclei_output ]]; then
+        for json_file in nuclei_output/*_json.txt nuclei_output/dast_json.txt; do
+            [[ -s "$json_file" ]] || continue
+            jq -r '
+                select((."template-id" // "" | test("(?i)(wordpress|wp-user|wp-login|wp-xmlrpc|xmlrpc|wp-config|wp-json)"))) |
+                (.["matched-at"] // .host // empty)
+            ' "$json_file" 2>/dev/null | while IFS= read -r line; do
+                _wp_brute_base_url "$line" | anew -q ".tmp/wp_brute_targets.txt"
+            done
+        done
+        for crit in info low medium high critical; do
+            [[ -s "nuclei_output/${crit}.txt" ]] || continue
+            grep -aiE 'wordpress|wp-user|wp-login|xmlrpc' "nuclei_output/${crit}.txt" 2>/dev/null \
+                | awk '{print $NF}' | while IFS= read -r line; do
+                    _wp_brute_base_url "$line" | anew -q ".tmp/wp_brute_targets.txt"
+                done
+        done
+    fi
+
+    if [[ -d cms ]]; then
+        while IFS= read -r cms_json; do
+            [[ -s "$cms_json" ]] || continue
+            local cms_id cms_url
+            cms_id=$(jq -r 'try .cms_id // empty' "$cms_json" 2>/dev/null)
+            cms_url=$(jq -r 'try .url // empty' "$cms_json" 2>/dev/null)
+            [[ "$cms_id" =~ [Ww]ord[Pp]ress ]] || continue
+            _wp_brute_base_url "$cms_url" | anew -q ".tmp/wp_brute_targets.txt"
+        done < <(find cms -type f -name 'cms.json' 2>/dev/null)
+    fi
+
+    if [[ -n "${WP_BRUTE_SEED_URLS:-}" ]]; then
+        local seed
+        IFS=',' read -ra _wp_seeds <<<"$WP_BRUTE_SEED_URLS"
+        for seed in "${_wp_seeds[@]}"; do
+            _wp_brute_base_url "$seed" | anew -q ".tmp/wp_brute_targets.txt"
+        done
+    fi
+
+    sort -u ".tmp/wp_brute_targets.txt" -o ".tmp/wp_brute_targets.txt" 2>/dev/null || true
+}
+
+_wp_brute_safe_dirname() {
+    echo "$1" | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's|:|_|g' -e 's/[^a-zA-Z0-9._-]/_/g'
+}
+
+# Run wp-brute-pro scanner only (phase 1) and write JSON.
+_wp_brute_run_recon() {
+    local target_url="$1"
+    local out_dir="$2"
+    local py_bin="${tools}/wp-brute-pro/venv/bin/python3"
+    local tool_root="${tools}/wp-brute-pro"
+
+    [[ -x "$py_bin" && -f "${tool_root}/core/scanner.py" ]] || return 1
+    mkdir -p "$out_dir"
+
+    WP_BRUTE_TARGET_URL="$target_url" WP_BRUTE_TOOL_ROOT="$tool_root" run_command \
+        "$py_bin" - <<'PY' >"${out_dir}/scan.json" 2>>"$LOGFILE"
+import json, os, sys
+root = os.environ.get("WP_BRUTE_TOOL_ROOT", ".")
+sys.path.insert(0, root)
+from core.scanner import Scanner
+url = os.environ.get("WP_BRUTE_TARGET_URL", "").rstrip("/")
+if not url:
+    sys.exit(2)
+info = Scanner(url).scan()
+print(json.dumps(info, indent=2, ensure_ascii=False))
+PY
+}
+
+function wp_brute_pro() {
+
+    if ! ensure_dirs .tmp vulns/wp_brute nuclei_output cms; then return 1; fi
+
+    if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ ${WP_BRUTE:-true} == true ]] \
+        && ! [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+
+        local py_bin="${tools}/wp-brute-pro/venv/bin/python3"
+        local tool_root="${tools}/wp-brute-pro"
+        if [[ ! -x "$py_bin" ]] || [[ ! -f "${tool_root}/wp_brute.py" ]]; then
+            _print_msg WARN "${FUNCNAME[0]}: wp-brute-pro not installed (${tool_root})"
+            skip_notification "noinput"
+            return 0
+        fi
+
+        _wp_brute_collect_targets
+        if [[ ! -s ".tmp/wp_brute_targets.txt" ]]; then
+            skip_notification "noinput"
+            return 0
+        fi
+
+        local target_count
+        target_count=$(wc -l <".tmp/wp_brute_targets.txt" | tr -d ' ')
+        if [[ $DEEP != true ]] && [[ "$target_count" -gt "${WP_BRUTE_MAX_TARGETS:-5}" ]]; then
+            end_func "Skipping wp_brute_pro: ${target_count} WordPress targets (limit ${WP_BRUTE_MAX_TARGETS:-5}, use --deep)." "${FUNCNAME[0]}"
+            return 0
+        fi
+
+        start_func "${FUNCNAME[0]}" "WordPress recon/brute (wp-brute-pro)"
+
+        local do_attack=false
+        if [[ ${WP_BRUTE_ATTACK:-false} == true ]]; then
+            if [[ ${WP_BRUTE_ATTACK_DEEP_ONLY:-true} != true ]] || [[ $DEEP == true ]]; then
+                do_attack=true
+            fi
+        fi
+
+        local target_url users_csv company_name host_key out_dir summary_file
+        : >"vulns/wp_brute/summary.txt"
+        summary_file="vulns/wp_brute/summary.txt"
+
+        company_name="${WP_BRUTE_COMPANY:-}"
+        if [[ -z "$company_name" ]]; then
+            company_name="${domain%%.*}"
+        fi
+
+        while IFS= read -r target_url; do
+            [[ -z "$target_url" ]] && continue
+            host_key=$(_wp_brute_safe_dirname "$target_url")
+            out_dir="${dir}/vulns/wp_brute/${host_key}"
+            mkdir -p "$out_dir"
+
+            _print_msg INFO "Running: wp-brute-pro recon on ${target_url}"
+            if ! _wp_brute_run_recon "$target_url" "$out_dir"; then
+                log_note "wp_brute_pro: recon failed for ${target_url}" "${FUNCNAME[0]}" "${LINENO}"
+                continue
+            fi
+
+            users_csv=$(jq -r '[.users[]?.slug // empty] | join(",")' "${out_dir}/scan.json" 2>/dev/null)
+            local wp_version xmlrpc_status waf_name
+            wp_version=$(jq -r '.wp_version // "unknown"' "${out_dir}/scan.json" 2>/dev/null)
+            xmlrpc_status=$([[ $(jq -r '.xmlrpc_active // false' "${out_dir}/scan.json" 2>/dev/null) == "true" ]] && echo active || echo disabled)
+            waf_name=$(jq -r '.waf_name // "none"' "${out_dir}/scan.json" 2>/dev/null)
+            printf '%s | users=%s | wp=%s | xmlrpc=%s | waf=%s\n' \
+                "$target_url" "${users_csv:-auto}" "$wp_version" "$xmlrpc_status" "$waf_name" \
+                | anew -q "$summary_file"
+
+            if [[ "$do_attack" != true ]]; then
+                continue
+            fi
+
+            local -a brute_cmd=(
+                "$py_bin" "${tool_root}/wp_brute.py"
+                -u "$target_url"
+                --company "$company_name"
+                --method "${WP_BRUTE_METHOD:-auto}"
+                --batch-size "${WP_BRUTE_BATCH_SIZE:-50}"
+                --delay "${WP_BRUTE_DELAY:-3}"
+                --max-passwords "${WP_BRUTE_MAX_PASSWORDS:-500}"
+                --output "$out_dir"
+                --export-json "${out_dir}/reconftw_export.json"
+                --no-color
+                --lang "${WP_BRUTE_LANG:-en}"
+                -v
+            )
+            [[ ${WP_BRUTE_CRAWL:-true} == true ]] && brute_cmd+=(--crawl)
+            [[ -n "$users_csv" ]] && brute_cmd+=(-U "$users_csv")
+            [[ -n "${WP_BRUTE_WORDLIST:-}" && -s "${WP_BRUTE_WORDLIST}" ]] && brute_cmd+=(--wordlist "${WP_BRUTE_WORDLIST}")
+            [[ -n "${WP_BRUTE_PROXY_LIST:-}" && -s "${WP_BRUTE_PROXY_LIST}" ]] && brute_cmd+=(--proxy-list "${WP_BRUTE_PROXY_LIST}")
+
+            _print_msg INFO "Running: wp-brute-pro attack on ${target_url} (users: ${users_csv:-auto})"
+            run_command "${brute_cmd[@]}" >>"$LOGFILE" 2>&1 || true
+
+            if [[ -s "${out_dir}/found.txt" ]]; then
+                cat "${out_dir}/found.txt" | anew -q "vulns/wp_brute/found.txt"
+            fi
+        done <".tmp/wp_brute_targets.txt"
+
+        end_func "Results are saved in vulns/wp_brute/ (summary.txt, per-host scan.json, optional found.txt)" "${FUNCNAME[0]}"
+    else
+        if [[ ${WP_BRUTE:-true} == false ]]; then
+            skip_notification "disabled"
+        elif [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            return
         else
             skip_notification "processed"
         fi

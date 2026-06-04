@@ -619,6 +619,7 @@ function vulns() {
             fi
             fuzzparams
             nuclei_dast
+            wp_brute_pro
             4xxbypass
             test_ssl
         else

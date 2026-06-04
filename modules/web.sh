@@ -713,6 +713,7 @@ function portscan() {
         fi
 
         if [[ $PORTSCAN_PASSIVE == true ]] && [[ ! -f "hosts/portscan_passive.txt" ]] && [[ -s ".tmp/ips_nocdn.txt" ]]; then
+            # smap writes nmap -oN-style text (not ip:port lines); parsed by _append_nmap_scan_text_as_urls.
             run_command smap -iL .tmp/ips_nocdn.txt >hosts/portscan_passive.txt
         fi
 
@@ -854,14 +855,14 @@ function portscan() {
 
 }
 
-# Turn ip:port lines (smap/naabu/etc.) into http(s) URLs for nuclei and webs/hosts lists.
+# Turn ip:port lines (naabu, etc.) into http(s) URLs for nuclei and webs/hosts lists.
 # Usage: _append_ip_port_file_as_urls <file>
 _append_ip_port_file_as_urls() {
     local infile="$1"
     [[ ! -s "$infile" ]] && return 0
 
     awk '
-    function emit(ip, port) {
+    function emit_ip_port(ip, port) {
         if (ip !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) return
         if (port !~ /^[0-9]+$/ || port + 0 < 1 || port + 0 > 65535) return
         if (port == 443 || port == 8443) printf "https://%s:%s\n", ip, port
@@ -873,29 +874,72 @@ _append_ip_port_file_as_urls() {
         sub(/\r$/, "", line)
         if (line ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+$/) {
             split(line, a, ":")
-            emit(a[1], a[2])
-            next
+            emit_ip_port(a[1], a[2])
         }
-        ip = ""
-        port = ""
-        for (i = 1; i <= NF; i++) {
-            if ($i ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) ip = $i
-            else if ($i ~ /^[0-9]+$/ && $i + 0 == $i) port = $i
-        }
-        if (ip != "" && port != "") emit(ip, port)
     }' "$infile" | anew -q hosts/webs.txt
 }
 
-# Open ports from nmap gnmap -> http(s) URLs (fallback when nmapurls XML path is empty).
+# Parse nmap normal output (smap/nmap -oN, including portscan_passive.txt) -> ip:port URLs.
+# Usage: _append_nmap_scan_text_as_urls <nmap_text_file>
+_append_nmap_scan_text_as_urls() {
+    local infile="$1"
+    [[ ! -s "$infile" ]] && return 0
+
+    awk '
+    function extract_paren_ip(line) {
+        if (match(line, /\([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\)/)) {
+            return substr(line, RSTART + 1, RLENGTH - 2)
+        }
+        return ""
+    }
+    function emit_ip_port(ip, port) {
+        if (ip !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) return
+        if (port !~ /^[0-9]+$/ || port + 0 < 1 || port + 0 > 65535) return
+        if (port == 443 || port == 8443) printf "https://%s:%s\n", ip, port
+        else if (port == 80) printf "http://%s\n", ip
+        else printf "http://%s:%s\n", ip, port
+    }
+    BEGIN { cur_ip = "" }
+    /^Nmap scan report for / {
+        cur_ip = extract_paren_ip($0)
+        if (cur_ip == "" && match($0, /for ([0-9]{1,3}\.){3}[0-9]{1,3}/)) {
+            cur_ip = substr($0, RSTART + 4, RLENGTH - 4)
+        }
+        next
+    }
+    /^[0-9]+\/tcp[[:space:]]+open/ {
+        if (cur_ip == "") next
+        split($1, p, "/")
+        emit_ip_port(cur_ip, p[1])
+    }' "$infile" | anew -q hosts/webs.txt
+}
+
+# Open ports from nmap gnmap -> http(s) ip:port URLs (fallback when nmapurls XML path is empty).
 # Usage: _append_gnmap_open_ports_as_urls <gnmap_file>
 _append_gnmap_open_ports_as_urls() {
     local gnmap="$1"
     [[ ! -s "$gnmap" ]] && return 0
 
     awk '
+    function extract_paren_ip(line) {
+        if (match(line, /\([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\)/)) {
+            return substr(line, RSTART + 1, RLENGTH - 2)
+        }
+        return ""
+    }
+    function emit_ip_port(ip, port) {
+        if (ip !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) return
+        if (port !~ /^[0-9]+$/ || port + 0 < 1 || port + 0 > 65535) return
+        if (port == 443 || port == 8443) printf "https://%s:%s\n", ip, port
+        else if (port == 80) printf "http://%s\n", ip
+        else printf "http://%s:%s\n", ip, port
+    }
     /^Host: / {
-        host = $2
-        if (host !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) next
+        cur_ip = extract_paren_ip($0)
+        if (cur_ip == "" && $2 ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) {
+            cur_ip = $2
+        }
+        if (cur_ip == "") next
         ports = $0
         sub(/^.*Ports: /, "", ports)
         n = split(ports, arr, ",")
@@ -903,10 +947,7 @@ _append_gnmap_open_ports_as_urls() {
             gsub(/^ +| +$/, "", arr[i])
             split(arr[i], f, "/")
             if (f[2] == "open" && f[1] ~ /^[0-9]+$/) {
-                port = f[1]
-                if (port == 443 || port == 8443) printf "https://%s:%s\n", host, port
-                else if (port == 80) printf "http://%s\n", host
-                else printf "http://%s:%s\n", host, port
+                emit_ip_port(cur_ip, f[1])
             }
         }
     }' "$gnmap" | anew -q hosts/webs.txt
@@ -914,7 +955,10 @@ _append_gnmap_open_ports_as_urls() {
 
 # Merge passive/active port discovery into hosts/webs.txt for nuclei.
 _feed_port_discovery_urls() {
-    _append_ip_port_file_as_urls "hosts/portscan_passive.txt"
+    # smap and many passive flows write nmap -oN-style text, not ip:port lines.
+    _append_nmap_scan_text_as_urls "hosts/portscan_passive.txt"
+    _append_nmap_scan_text_as_urls "hosts/portscan_active.nmap"
+    _append_nmap_scan_text_as_urls "hosts/portscan_active_targeted.nmap"
     _append_ip_port_file_as_urls "hosts/naabu_open.txt"
     _append_gnmap_open_ports_as_urls "hosts/portscan_active.gnmap"
     _append_gnmap_open_ports_as_urls "hosts/portscan_active_targeted.gnmap"
@@ -1477,6 +1521,36 @@ function grpc_reflection() {
     fi
 }
 
+_llm_probe_collect_targets() {
+    : >".tmp/llm_probe_targets.txt"
+
+    ensure_webs_all || true
+
+    local src
+    for src in webs/webs_all.txt webs/webs.txt hosts/webs.txt; do
+        [[ -s "$src" ]] || continue
+        grep -aE '^https?://' "$src" | sed 's/\r$//' | anew -q ".tmp/llm_probe_targets.txt"
+    done
+
+    # Normalize bare host:port lines (common in webs lists) to https:// URLs for julius.
+    if [[ -s "webs/webs_all.txt" ]]; then
+        grep -aE '^[^[:space:]#/]+:[0-9]+$' "webs/webs_all.txt" | sed 's/\r$//' | while IFS= read -r hp; do
+            [[ -z "$hp" ]] && continue
+            local host="${hp%%:*}"
+            local port="${hp##*:}"
+            if [[ "$port" == "443" ]] || [[ "$port" == "8443" ]]; then
+                printf 'https://%s:%s\n' "$host" "$port"
+            elif [[ "$port" == "80" ]]; then
+                printf 'http://%s\n' "$host"
+            else
+                printf 'http://%s:%s\n' "$host" "$port"
+            fi
+        done | anew -q ".tmp/llm_probe_targets.txt"
+    fi
+
+    sort -u ".tmp/llm_probe_targets.txt" -o ".tmp/llm_probe_targets.txt" 2>/dev/null || true
+}
+
 function llm_probe() {
     ensure_dirs webs .tmp
 
@@ -1485,15 +1559,20 @@ function llm_probe() {
             _print_msg WARN "${FUNCNAME[0]}: julius not found in PATH"
             return 0
         fi
-        if [[ ! -s "webs/webs_all.txt" ]]; then
+
+        _llm_probe_collect_targets
+        if [[ ! -s ".tmp/llm_probe_targets.txt" ]]; then
+            _print_msg WARN "${FUNCNAME[0]}: no http(s) targets found in webs/webs_all.txt, webs/webs.txt, or hosts/webs.txt"
             skip_notification "noinput"
             return 0
         fi
+
         start_func "${FUNCNAME[0]}" "LLM service probing (julius)"
 
-        local -a julius_cmd=(julius -o jsonl -q probe -f "webs/webs_all.txt")
+        local target_file="${dir}/.tmp/llm_probe_targets.txt"
+        local -a julius_cmd=(julius probe -f "$target_file" -o jsonl -q)
         if [[ "${LLM_PROBE_AUGUSTUS:-false}" == "true" ]]; then
-            julius_cmd=(julius -o jsonl -q probe --augustus -f "webs/webs_all.txt")
+            julius_cmd=(julius probe -f "$target_file" -o jsonl -q --augustus)
         fi
 
         run_command "${julius_cmd[@]}" >"webs/llm_probe.jsonl" 2>>"$LOGFILE" || true
@@ -1701,25 +1780,59 @@ function cms_scanner() {
             return
         fi
 
-        # Run CMSeeK with timeout
-        local cmseek_cmd=(
-            timeout -k 1m "${CMSSCAN_TIMEOUT}s"
-            "${tools}/CMSeeK/venv/bin/python3" "${tools}/CMSeeK/cmseek.py"
-            -l webs/webs_all.txt --batch -r
-        )
-        run_with_heartbeat "cmseek batch scan" "${cmseek_cmd[@]}"
-        local exit_status=$?
-        if [[ ${exit_status} -ne 0 ]]; then
-            # Attempt one-time repair on known CMSeeK index corruption.
-            if [[ ${exit_status} -eq 124 || ${exit_status} -eq 137 ]]; then
-                echo "TIMEOUT cmseek.py - investigate manually for $dir" >>"$LOGFILE"
-                end_func "TIMEOUT cmseek.py - investigate manually for $dir" "${FUNCNAME[0]}"
-                return
-            elif [[ ${exit_status} -ne 0 ]]; then
-                echo "ERROR cmseek.py - investigate manually for $dir" >>"$LOGFILE"
-                end_func "ERROR cmseek.py - investigate manually for $dir" "${FUNCNAME[0]}"
-                return
+        # CMSeeK batch -l treats the whole file as one target when lines are glued together.
+        # Scan one normalized URL per invocation instead.
+        : >".tmp/cms_targets.txt"
+        while IFS= read -r _cms_line || [[ -n "$_cms_line" ]]; do
+            _cms_line="${_cms_line//$'\r'/}"
+            _cms_line="${_cms_line#"${_cms_line%%[![:space:]]*}"}"
+            _cms_line="${_cms_line%"${_cms_line##*[![:space:]]}"}"
+            [[ -z "$_cms_line" ]] && continue
+            if [[ "$_cms_line" =~ ^https?:// ]]; then
+                printf '%s\n' "$_cms_line" | anew -q ".tmp/cms_targets.txt"
+            elif [[ "$_cms_line" =~ ^[^[:space:]#/]+:[0-9]+$ ]]; then
+                local _cms_host="${_cms_line%%:*}"
+                local _cms_port="${_cms_line##*:}"
+                if [[ "$_cms_port" == "443" ]] || [[ "$_cms_port" == "8443" ]]; then
+                    printf 'https://%s:%s\n' "$_cms_host" "$_cms_port" | anew -q ".tmp/cms_targets.txt"
+                elif [[ "$_cms_port" == "80" ]]; then
+                    printf 'http://%s\n' "$_cms_host" | anew -q ".tmp/cms_targets.txt"
+                else
+                    printf 'http://%s:%s\n' "$_cms_host" "$_cms_port" | anew -q ".tmp/cms_targets.txt"
+                fi
             fi
+        done <"webs/webs_all.txt"
+
+        if [[ ! -s ".tmp/cms_targets.txt" ]]; then
+            end_func "No valid http(s) targets in webs/webs_all.txt, cms scanner skipped." "${FUNCNAME[0]}" "SKIP_NOINPUT"
+            return
+        fi
+
+        local _cms_target _cms_failures=0 _cms_ok=0
+        while IFS= read -r _cms_target; do
+            [[ -z "$_cms_target" ]] && continue
+            local cmseek_cmd=(
+                timeout -k 1m "${CMSSCAN_TIMEOUT}s"
+                "${tools}/CMSeeK/venv/bin/python3" "${tools}/CMSeeK/cmseek.py"
+                -u "$_cms_target" --batch -r
+            )
+            run_with_heartbeat "cmseek ${_cms_target}" "${cmseek_cmd[@]}"
+            local exit_status=$?
+            if [[ ${exit_status} -ne 0 ]]; then
+                ((++_cms_failures))
+                if [[ ${exit_status} -eq 124 || ${exit_status} -eq 137 ]]; then
+                    echo "TIMEOUT cmseek.py ${_cms_target} - investigate manually for $dir" >>"$LOGFILE"
+                else
+                    echo "ERROR cmseek.py ${_cms_target} - investigate manually for $dir" >>"$LOGFILE"
+                fi
+            else
+                ((++_cms_ok))
+            fi
+        done <".tmp/cms_targets.txt"
+
+        if [[ $_cms_ok -eq 0 && $_cms_failures -gt 0 ]]; then
+            end_func "CMSeeK failed for all ${_cms_failures} target(s) - investigate manually for $dir" "${FUNCNAME[0]}"
+            return
         fi
 
         # Process CMSeeK results
@@ -1736,7 +1849,7 @@ function cms_scanner() {
                     log_note "cms_scanner: empty cms_id for ${sub_out}, results moved for inspection" "${FUNCNAME[0]}" "${LINENO}"
                 fi
             fi
-        done <"webs/webs_all.txt"
+        done <".tmp/cms_targets.txt"
 
         end_func "Results are saved in $domain/cms/*subdomain* folder" "${FUNCNAME[0]}"
     else
