@@ -98,7 +98,7 @@ deep_wildcard_filter() {
                     local wildcard_parent
                     wildcard_parent="${resolved_probe#*.}"
                     echo "$wildcard_parent" >> ".tmp/dwf_new_wildcards.txt"
-                    ((wildcards_found++))
+                    wildcards_found=$((wildcards_found + 1))
                 done < ".tmp/dwf_resolved_probes.txt"
 
                 if [[ -s ".tmp/dwf_new_wildcards.txt" ]]; then
