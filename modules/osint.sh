@@ -460,17 +460,41 @@ function emails() {
 
         start_func "${FUNCNAME[0]}" "Searching for emails/users/passwords leaks"
 
-        run_command env PYTHONWARNINGS=ignore "${tools}/EmailHarvester/venv/bin/python3" "${tools}/EmailHarvester/EmailHarvester.py" -d ${domain} -e all -l 20 2>>"$LOGFILE" | anew -q .tmp/EmailHarvester.txt || true
+        # EmailHarvester uses requests.get() without per-request timeout; cap the whole run (15m).
+        local eh_out=".tmp/EmailHarvester_raw.txt"
+        local -a eh_cmd=(
+            env PYTHONUNBUFFERED=1 PYTHONWARNINGS=ignore
+            "${tools}/EmailHarvester/venv/bin/python3" "${tools}/EmailHarvester/EmailHarvester.py"
+            -d "$domain"
+            -e all
+            -l 20
+            --noprint
+            -s "$eh_out"
+        )
+
+        if [[ -n "${TIMEOUT_CMD:-}" ]]; then
+            run_with_heartbeat "EmailHarvester" 30 \
+                "$TIMEOUT_CMD" -k 30s 900 \
+                "${eh_cmd[@]}" 2>>"$LOGFILE" || log_note "EmailHarvester timed out or failed after 900s (partial results kept if any)" "${FUNCNAME[0]}" "${LINENO}"
+        else
+            run_with_heartbeat "EmailHarvester" 30 "${eh_cmd[@]}" 2>>"$LOGFILE" || true
+        fi
+        [[ -s "$eh_out" ]] && cat "$eh_out" | anew -q .tmp/EmailHarvester.txt || true
 
         # Process emailfinder results
         if [[ -s ".tmp/EmailHarvester.txt" ]]; then
             grep "@" .tmp/EmailHarvester.txt | anew -q osint/emails.txt || true
         fi
 
-        # Run LeakSearch in a subshell to avoid CWD pollution
+        # Run LeakSearch in a subshell to avoid CWD pollution (10m cap when timeout(1) exists)
         (
             cd "${tools}/LeakSearch" || exit 1
-            run_command "${tools}/LeakSearch/venv/bin/python3" LeakSearch.py -k "$domain" -o "${dir}/.tmp/passwords.txt" 1>>"$LOGFILE"
+            local -a leak_cmd=("${tools}/LeakSearch/venv/bin/python3" LeakSearch.py -k "$domain" -o "${dir}/.tmp/passwords.txt")
+            if [[ -n "${TIMEOUT_CMD:-}" ]]; then
+                run_command "$TIMEOUT_CMD" -k 30s 600 "${leak_cmd[@]}" 1>>"$LOGFILE" 2>>"$LOGFILE" || true
+            else
+                run_command "${leak_cmd[@]}" 1>>"$LOGFILE" 2>>"$LOGFILE" || true
+            fi
         )
 
         # Process passwords.txt
