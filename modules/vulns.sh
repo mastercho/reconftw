@@ -40,9 +40,24 @@ _vulns_collect_ghauri_findings() {
     [[ -s "$log" ]] || return 1
 
     awk '
+    function remember(line,    m) {
+        if (match(line, /https?:\/\/[^[:space:]'"'"'"]+/)) {
+            url = substr(line, RSTART, RLENGTH)
+            sub(/['"'"'"].*$/, "", url)
+        }
+    }
     /^=== TARGET: / {
         url = $0
         sub(/^=== TARGET: /, "", url)
+        next
+    }
+    /\[INFO\].*testing|testing connection to the target URL|target URL/ {
+        remember($0)
+        next
+    }
+    /^https?:\/\// {
+        url = $0
+        sub(/[[:space:]].*$/, "", url)
         next
     }
     /[Pp]arameter.+is vulnerable|identified the following injection|is vulnerable to SQL injection/ {
@@ -482,9 +497,11 @@ function sqli() {
                 if [[ $GHAURI == true ]]; then
                     _print_msg INFO "Running: Ghauri for SQLi Checks"
                     mkdir -p .tmp/ghauri_parts vulns
-                    run_command interlace -tL ".tmp/tmp_sqli.txt" -threads "$INTERLACE_THREADS" -c "echo '=== TARGET: _target_ ===' >> .tmp/ghauri_parts/_cleantarget_.txt; ghauri -u _target_ --batch -H \"${HEADER}\" --force-ssl >> .tmp/ghauri_parts/_cleantarget_.txt 2>&1" 2>>"$LOGFILE" >/dev/null
-                    # Merge per-target outputs to avoid concurrent write corruption
-                    cat .tmp/ghauri_parts/*.txt 2>/dev/null | anew -q vulns/ghauri_log.txt || true
+                    rm -rf .tmp/ghauri_parts/*
+                    run_command interlace -tL ".tmp/tmp_sqli.txt" -threads "$INTERLACE_THREADS" -c "echo '=== TARGET: _target_ ===' >> .tmp/ghauri_parts/_cleantarget_.txt; ghauri -u _target_ --batch --dbs -H \"${HEADER}\" --force-ssl >> .tmp/ghauri_parts/_cleantarget_.txt 2>&1" 2>>"$LOGFILE" >/dev/null
+                    # One log file per sqli run (not appended across scans) so TARGET lines stay with findings
+                    : >vulns/ghauri_log.txt
+                    cat .tmp/ghauri_parts/*.txt 2>/dev/null >>vulns/ghauri_log.txt || true
                     _vulns_collect_ghauri_findings || true
                     rm -rf .tmp/ghauri_parts
                 fi
