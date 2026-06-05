@@ -32,6 +32,32 @@ _vulns_build_qsreplace_fuzz_list() {
     [[ -s "$dest" ]]
 }
 
+# Pull confirmed SQLi lines from merged ghauri output into vulns/ghauri.txt (only when hits exist).
+_vulns_collect_ghauri_findings() {
+    local log="vulns/ghauri_log.txt"
+    local out="vulns/ghauri.txt"
+
+    [[ -s "$log" ]] || return 1
+
+    awk '
+    /^=== TARGET: / {
+        url = $0
+        sub(/^=== TARGET: /, "", url)
+        next
+    }
+    /[Pp]arameter.+is vulnerable|identified the following injection|is vulnerable to SQL injection/ {
+        line = $0
+        sub(/\r$/, "", line)
+        sub(/\. Do you want.*$/, ".", line)
+        sub(/ is vulnerable\..*$/, " is vulnerable.", line)
+        if (url != "") print url " | " line
+        else print line
+    }
+    ' "$log" 2>/dev/null | anew -q "$out"
+
+    [[ -s "$out" ]]
+}
+
 function xss() {
 
     # Create necessary directories
@@ -449,15 +475,17 @@ function sqli() {
                     if [[ $SQLMAP == true ]]; then
                         _print_msg INFO "Running: SQLMap for SQLi Checks"
                         run_command python3 "${tools}/sqlmap/sqlmap.py" -m ".tmp/tmp_sqli.txt" -b -o --smart \
-                            --batch --disable-coloring --random-agent --output-dir="vulns/sqlmap" 2>>"$LOGFILE" >/dev/null
+                            --batch --disable-coloring --random-agent --level=5 --risk=3 \
+                            --output-dir="vulns/sqlmap" 2>>"$LOGFILE" >/dev/null
                     fi
                                 # Check if GHAURI is enabled and run Ghauri
                 if [[ $GHAURI == true ]]; then
                     _print_msg INFO "Running: Ghauri for SQLi Checks"
-                    mkdir -p .tmp/ghauri_parts
-                    run_command interlace -tL ".tmp/tmp_sqli.txt" -threads "$INTERLACE_THREADS" -c "ghauri -u _target_ --batch -H \"${HEADER}\" --force-ssl >> .tmp/ghauri_parts/_cleantarget_.txt" 2>>"$LOGFILE" >/dev/null
+                    mkdir -p .tmp/ghauri_parts vulns
+                    run_command interlace -tL ".tmp/tmp_sqli.txt" -threads "$INTERLACE_THREADS" -c "echo '=== TARGET: _target_ ===' >> .tmp/ghauri_parts/_cleantarget_.txt; ghauri -u _target_ --batch -H \"${HEADER}\" --force-ssl >> .tmp/ghauri_parts/_cleantarget_.txt 2>&1" 2>>"$LOGFILE" >/dev/null
                     # Merge per-target outputs to avoid concurrent write corruption
                     cat .tmp/ghauri_parts/*.txt 2>/dev/null | anew -q vulns/ghauri_log.txt || true
+                    _vulns_collect_ghauri_findings || true
                     rm -rf .tmp/ghauri_parts
                 fi
 
@@ -1081,8 +1109,13 @@ _wp_brute_collect_nuclei_users() {
             (.["extracted-results"] // [])[]? |
             select(. != null and (. | tostring | length) > 0) |
             [$m, (. | tostring)] | @tsv
-        ' "$json_file" 2>/dev/null >>".tmp/wp_brute_nuclei_users.tsv"
+        ' "$json_file" 2>/dev/null | while IFS=$'\t' read -r matched user; do
+            [[ -z "$matched" || -z "$user" ]] && continue
+            base=$(_wp_brute_base_url "$matched") || continue
+            printf '%s\t%s\n' "$base" "$user"
+        done >>".tmp/wp_brute_nuclei_users.tsv"
     done
+    sort -u ".tmp/wp_brute_nuclei_users.tsv" -o ".tmp/wp_brute_nuclei_users.tsv" 2>/dev/null || true
 }
 
 _wp_brute_nuclei_users_csv() {
@@ -1206,6 +1239,7 @@ _wp_brute_run_hybrid_spray() {
     local out_dir="$2"
     local attack_wordlist="$3"
     local company_name="$4"
+    local users_csv="${5:-}"
     local scan_json_rel="vulns/wp_brute/$(_wp_brute_safe_dirname "$target_url")/scan.json"
     local py_bin="${tools}/wp-brute-pro/venv/bin/python3"
     local tool_root="${tools}/wp-brute-pro"
@@ -1216,6 +1250,7 @@ _wp_brute_run_hybrid_spray() {
     local -a spray_cmd=(
         "$py_bin" "$spray_script"
         -u "$target_url"
+        -U "$users_csv"
         --priority-wordlist "$attack_wordlist"
         --scan-json "$scan_json_rel"
         --method "${WP_BRUTE_METHOD:-auto}"
@@ -1347,7 +1382,7 @@ function wp_brute_pro() {
             local wordlist_count
             wordlist_count=$(wc -l <"$attack_wordlist" | tr -d ' ')
             _print_msg INFO "Running: wp-brute hybrid spray on ${target_url} (${wordlist_count} priority passwords + smart generation, users: ${users_csv})"
-            _wp_brute_run_hybrid_spray "$target_url" "$out_dir" "$attack_wordlist" "$company_name" >>"$LOGFILE" 2>&1 || true
+            _wp_brute_run_hybrid_spray "$target_url" "$out_dir" "$attack_wordlist" "$company_name" "$users_csv" >>"$LOGFILE" 2>&1 || true
 
             if [[ -s "${out_dir}/found.txt" ]]; then
                 cat "${out_dir}/found.txt" | anew -q "vulns/wp_brute/found.txt"
