@@ -498,7 +498,8 @@ function sqli() {
                     _print_msg INFO "Running: Ghauri for SQLi Checks"
                     mkdir -p .tmp/ghauri_parts vulns
                     rm -rf .tmp/ghauri_parts/*
-                    run_command interlace -tL ".tmp/tmp_sqli.txt" -threads "$INTERLACE_THREADS" -c "echo '=== TARGET: _target_ ===' >> .tmp/ghauri_parts/_cleantarget_.txt; ghauri -u _target_ --batch --dbs -H \"${HEADER}\" --force-ssl >> .tmp/ghauri_parts/_cleantarget_.txt 2>&1" 2>>"$LOGFILE" >/dev/null
+                    # Quote _target_: URLs with & (e.g. ?a=FUZZ&b=FUZZ) break the shell if unquoted.
+                    run_command interlace -tL ".tmp/tmp_sqli.txt" -threads "$INTERLACE_THREADS" -c "printf '%s\n' '=== TARGET: _target_ ===' >> .tmp/ghauri_parts/_cleantarget_.txt; ghauri -u \"_target_\" --batch --dbs -H \"${HEADER}\" --force-ssl >> .tmp/ghauri_parts/_cleantarget_.txt 2>&1" 2>>"$LOGFILE" >/dev/null
                     # One log file per sqli run (not appended across scans) so TARGET lines stay with findings
                     : >vulns/ghauri_log.txt
                     cat .tmp/ghauri_parts/*.txt 2>/dev/null >>vulns/ghauri_log.txt || true
