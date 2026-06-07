@@ -970,13 +970,45 @@ _feed_port_discovery_urls() {
     fi
 }
 
+# Drop default :443/:80 from http(s) URLs; lowercase host for dedup. Bare IPs pass through.
+# Usage: ... | _normalize_nuclei_targets | sort -u
+_normalize_nuclei_targets() {
+    awk '
+    {
+        url = $0
+        gsub(/\r$/, "", url)
+        if (url !~ /^https?:\/\//) {
+            print url
+            next
+        }
+        scheme = (url ~ /^https:\/\//) ? "https" : "http"
+        rest = url
+        sub(/^https?:\/\//, "", rest)
+        path = ""
+        if (match(rest, /\//)) {
+            path = substr(rest, RSTART)
+            rest = substr(rest, 1, RSTART - 1)
+        }
+        n = split(rest, hp, ":")
+        host = hp[1]
+        port = (n > 1) ? hp[2] : ""
+        host = tolower(host)
+        if (port == "" || (scheme == "https" && port == "443") || (scheme == "http" && port == "80"))
+            print scheme "://" host path
+        else
+            print scheme "://" host ":" port path
+    }'
+}
+
 # Build .tmp/webs_subs.txt for nuclei: httpx-live host URLs, non-CDN IPs, and ip:port from port scans.
 # subdomains/subdomains.txt is excluded (unprobed DNS names); hostname targets come from webs_all.
 _build_nuclei_target_list() {
     _feed_port_discovery_urls
     ensure_webs_all || true
     cat webs/webs_all.txt .tmp/ips_nocdn.txt hosts/webs.txt 2>>"$LOGFILE" \
-        | sed '/^$/d' | sort -u >.tmp/webs_subs.txt
+        | sed '/^$/d' \
+        | _normalize_nuclei_targets \
+        | sort -u >.tmp/webs_subs.txt
 }
 
 _build_service_fp_targets_from_nmap() {
