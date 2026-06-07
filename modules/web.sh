@@ -1246,18 +1246,14 @@ _nuclei_scan_local() {
         # Non-WAF at default rate
         if [[ -s "$NOWAF_LIST" ]]; then
             # shellcheck disable=SC2086  # Intentionally allow user-provided nuclei args
-            run_with_heartbeat "nuclei ${crit} (normal targets)" nuclei \
-                -l "$NOWAF_LIST" -severity "$crit" -nh -rl "$NUCLEI_RATELIMIT" -silent -retries 2 \
-                $NUCLEI_EXTRA_ARGS -t "${NUCLEI_TEMPLATES_PATH}" -j -o "nuclei_output/${crit}_json.txt"
+            run_with_heartbeat "nuclei ${crit} (normal targets)" nuclei -l "$NOWAF_LIST" -severity "$crit" -nh -rl "$NUCLEI_RATELIMIT" -silent -retries 2 $NUCLEI_EXTRA_ARGS -t "${NUCLEI_TEMPLATES_PATH}" -j -o "nuclei_output/${crit}_json.txt"
         fi
         # WAF hosts at slower rate
         if [[ -s "$WAF_LIST" ]]; then
             local slow_rl
             slow_rl=$((NUCLEI_RATELIMIT / 3 + 1))
             # shellcheck disable=SC2086  # Intentionally allow user-provided nuclei args
-            run_with_heartbeat "nuclei ${crit} (waf targets)" nuclei \
-                -l "$WAF_LIST" -severity "$crit" -nh -rl "$slow_rl" -silent -retries 2 \
-                $NUCLEI_EXTRA_ARGS -t "${NUCLEI_TEMPLATES_PATH}" -j -o "nuclei_output/${crit}_waf_json.txt"
+            run_with_heartbeat "nuclei ${crit} (waf targets)" nuclei -l "$WAF_LIST" -severity "$crit" -nh -rl "$slow_rl" -silent -retries 2 $NUCLEI_EXTRA_ARGS -t "${NUCLEI_TEMPLATES_PATH}" -j -o "nuclei_output/${crit}_waf_json.txt"
             [[ -s "nuclei_output/${crit}_waf_json.txt" ]] && cat "nuclei_output/${crit}_waf_json.txt" >>"nuclei_output/${crit}_json.txt"
         fi
         _nuclei_parse_results "$crit"
@@ -1272,10 +1268,7 @@ _nuclei_scan_axiom() {
     for crit in "${severity_array[@]}"; do
         _print_msg INFO "Running: Axiom Nuclei Severity: ${crit}. Check results in nuclei_output folder."
         # shellcheck disable=SC2086  # Intentionally allow user-provided nuclei args
-        run_with_heartbeat "axiom nuclei ${crit}" axiom-scan .tmp/webs_subs.txt -m nuclei \
-            --nuclei-templates "$NUCLEI_TEMPLATES_PATH" \
-            -severity "$crit" -nh -rl "$NUCLEI_RATELIMIT" \
-            -silent -retries 2 $NUCLEI_EXTRA_ARGS -j -o "nuclei_output/${crit}_json.txt" "$AXIOM_EXTRA_ARGS"
+        run_with_heartbeat "axiom nuclei ${crit}" axiom-scan .tmp/webs_subs.txt -m nuclei --nuclei-templates "$NUCLEI_TEMPLATES_PATH" -severity "$crit" -nh -rl "$NUCLEI_RATELIMIT" -silent -retries 2 $NUCLEI_EXTRA_ARGS -j -o "nuclei_output/${crit}_json.txt" "$AXIOM_EXTRA_ARGS"
         _nuclei_parse_results "$crit"
     done
 }

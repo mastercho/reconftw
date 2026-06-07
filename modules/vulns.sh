@@ -1036,14 +1036,10 @@ function nuclei_dast() {
         local dast_templates="${NUCLEI_DAST_TEMPLATE_PATH:-${NUCLEI_TEMPLATES_PATH}/dast}"
         if [[ $AXIOM != true ]]; then
             # shellcheck disable=SC2086  # Intentionally allow user-provided nuclei args
-            run_command nuclei -l ".tmp/nuclei_dast_targets.txt" -dast -nh -rl "$NUCLEI_RATELIMIT" -silent -retries 2 \
-                $NUCLEI_EXTRA_ARGS $NUCLEI_DAST_EXTRA_ARGS -t "$dast_templates" -j -o ".tmp/nuclei_dast_json_raw.txt" \
-                2>>"$LOGFILE" >/dev/null
+            run_command nuclei -l ".tmp/nuclei_dast_targets.txt" -dast -nh -rl "$NUCLEI_RATELIMIT" -silent -retries 2 $NUCLEI_EXTRA_ARGS $NUCLEI_DAST_EXTRA_ARGS -t "$dast_templates" -j -o ".tmp/nuclei_dast_json_raw.txt" 2>>"$LOGFILE" >/dev/null
         else
             # shellcheck disable=SC2086  # Intentionally allow user-provided nuclei args
-            run_command axiom-scan ".tmp/nuclei_dast_targets.txt" -m nuclei -dast -nh -rl "$NUCLEI_RATELIMIT" -silent -retries 2 \
-                $NUCLEI_EXTRA_ARGS $NUCLEI_DAST_EXTRA_ARGS -t "$dast_templates" -j -o ".tmp/nuclei_dast_json_raw.txt" \
-                $AXIOM_EXTRA_ARGS 2>>"$LOGFILE" >/dev/null
+            run_command axiom-scan ".tmp/nuclei_dast_targets.txt" -m nuclei -dast -nh -rl "$NUCLEI_RATELIMIT" -silent -retries 2 $NUCLEI_EXTRA_ARGS $NUCLEI_DAST_EXTRA_ARGS -t "$dast_templates" -j -o ".tmp/nuclei_dast_json_raw.txt" $AXIOM_EXTRA_ARGS 2>>"$LOGFILE" >/dev/null
         fi
 
         if [[ -s ".tmp/nuclei_dast_json_raw.txt" ]]; then
