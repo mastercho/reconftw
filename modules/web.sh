@@ -865,7 +865,8 @@ _append_ip_port_file_as_urls() {
     function emit_ip_port(ip, port) {
         if (ip !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) return
         if (port !~ /^[0-9]+$/ || port + 0 < 1 || port + 0 > 65535) return
-        if (port == 443 || port == 8443) printf "https://%s:%s\n", ip, port
+        if (port == 443) printf "https://%s\n", ip
+        else if (port == 8443) printf "https://%s:%s\n", ip, port
         else if (port == 80) printf "http://%s\n", ip
         else printf "http://%s:%s\n", ip, port
     }
@@ -895,7 +896,8 @@ _append_nmap_scan_text_as_urls() {
     function emit_ip_port(ip, port) {
         if (ip !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) return
         if (port !~ /^[0-9]+$/ || port + 0 < 1 || port + 0 > 65535) return
-        if (port == 443 || port == 8443) printf "https://%s:%s\n", ip, port
+        if (port == 443) printf "https://%s\n", ip
+        else if (port == 8443) printf "https://%s:%s\n", ip, port
         else if (port == 80) printf "http://%s\n", ip
         else printf "http://%s:%s\n", ip, port
     }
@@ -930,7 +932,8 @@ _append_gnmap_open_ports_as_urls() {
     function emit_ip_port(ip, port) {
         if (ip !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) return
         if (port !~ /^[0-9]+$/ || port + 0 < 1 || port + 0 > 65535) return
-        if (port == 443 || port == 8443) printf "https://%s:%s\n", ip, port
+        if (port == 443) printf "https://%s\n", ip
+        else if (port == 8443) printf "https://%s:%s\n", ip, port
         else if (port == 80) printf "http://%s\n", ip
         else printf "http://%s:%s\n", ip, port
     }
@@ -967,10 +970,11 @@ _feed_port_discovery_urls() {
     fi
 }
 
-# Build .tmp/webs_subs.txt for nuclei: httpx-live URLs, non-CDN IPs, and ip:port from port scans.
-# Raw subdomains/subdomains.txt is excluded (unprobed DNS names); use webs/webs_all.txt instead.
+# Build .tmp/webs_subs.txt for nuclei: httpx-live host URLs, non-CDN IPs, and ip:port from port scans.
+# subdomains/subdomains.txt is excluded (unprobed DNS names); hostname targets come from webs_all.
 _build_nuclei_target_list() {
     _feed_port_discovery_urls
+    ensure_webs_all || true
     cat webs/webs_all.txt .tmp/ips_nocdn.txt hosts/webs.txt 2>>"$LOGFILE" \
         | sed '/^$/d' | sort -u >.tmp/webs_subs.txt
 }
