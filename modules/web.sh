@@ -967,10 +967,11 @@ _feed_port_discovery_urls() {
     fi
 }
 
-# Build .tmp/webs_subs.txt for nuclei: hostnames, probed URLs, non-CDN IPs, and http(s)://ip:port from port scans.
+# Build .tmp/webs_subs.txt for nuclei: httpx-live URLs, non-CDN IPs, and ip:port from port scans.
+# Raw subdomains/subdomains.txt is excluded (unprobed DNS names); use webs/webs_all.txt instead.
 _build_nuclei_target_list() {
     _feed_port_discovery_urls
-    cat subdomains/subdomains.txt webs/webs_all.txt .tmp/ips_nocdn.txt hosts/webs.txt 2>>"$LOGFILE" \
+    cat webs/webs_all.txt .tmp/ips_nocdn.txt hosts/webs.txt 2>>"$LOGFILE" \
         | sed '/^$/d' | sort -u >.tmp/webs_subs.txt
 }
 
