@@ -1391,6 +1391,41 @@ function graphql_scan() {
     fi
 }
 
+# Return 0 when URL host is a bare IPv4/IPv6 literal (not a hostname).
+_url_host_is_ip() {
+    local url="$1" rest host
+    [[ "$url" =~ ^https?:// ]] || return 1
+    rest="${url#*://}"
+    rest="${rest%%/*}"
+    rest="${rest%%\?*}"
+    rest="${rest%%#*}"
+    if [[ "$rest" == \[*\]* ]]; then
+        return 0
+    fi
+    if [[ "$rest" == *:* ]]; then
+        host="${rest%%:*}"
+    else
+        host="$rest"
+    fi
+    [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+# Drop http(s) URLs whose host is a bare IP; pass through hostname URLs and non-URL lines.
+_filter_hostname_http_urls() {
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line//$'\r'/}"
+        [[ -z "$line" ]] && continue
+        if [[ "$line" =~ ^https?:// ]] && _url_host_is_ip "$line"; then
+            continue
+        fi
+        if [[ "$line" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
+            continue
+        fi
+        printf '%s\n' "$line"
+    done
+}
+
 function param_discovery() {
     ensure_dirs webs .tmp
 
@@ -1421,6 +1456,14 @@ function param_discovery() {
         : >"$arjun_urls_params"
         [[ ! -s $input_file ]] && input_file="webs/webs_all.txt"
         if [[ -s $input_file ]]; then
+            local arjun_input=".tmp/arjun_input.txt"
+            _filter_hostname_http_urls <"$input_file" >"$arjun_input" || true
+            if [[ ! -s "$arjun_input" ]]; then
+                log_note "${FUNCNAME[0]}: no hostname URLs after filtering bare IPs from $input_file" "${FUNCNAME[0]}" "${LINENO}"
+                end_func "Results are saved in webs/params_discovered.txt" "${FUNCNAME[0]}"
+                return 0
+            fi
+            input_file="$arjun_input"
             if [[ $AXIOM == true ]]; then
                 if ! run_command axiom-scan "$input_file" -m arjun -o .tmp/arjun.txt "$AXIOM_EXTRA_ARGS" 2>>"$LOGFILE" >/dev/null; then
                     arjun_axiom_ok=false
@@ -1559,13 +1602,14 @@ _llm_probe_collect_targets() {
     local src
     for src in webs/webs_all.txt webs/webs.txt hosts/webs.txt; do
         [[ -s "$src" ]] || continue
-        grep -aE '^https?://' "$src" | sed 's/\r$//' | anew -q ".tmp/llm_probe_targets.txt"
+        grep -aE '^https?://' "$src" | sed 's/\r$//' | _filter_hostname_http_urls | anew -q ".tmp/llm_probe_targets.txt" || true
     done
 
     # Normalize bare host:port lines (common in webs lists) to https:// URLs for julius.
     if [[ -s "webs/webs_all.txt" ]]; then
         grep -aE '^[^[:space:]#/]+:[0-9]+$' "webs/webs_all.txt" | sed 's/\r$//' | while IFS= read -r hp; do
             [[ -z "$hp" ]] && continue
+            [[ "$hp" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]] && continue
             local host="${hp%%:*}"
             local port="${hp##*:}"
             if [[ "$port" == "443" ]] || [[ "$port" == "8443" ]]; then
@@ -1575,7 +1619,7 @@ _llm_probe_collect_targets() {
             else
                 printf 'http://%s:%s\n' "$host" "$port"
             fi
-        done | anew -q ".tmp/llm_probe_targets.txt"
+        done | anew -q ".tmp/llm_probe_targets.txt" || true
     fi
 
     sort -u ".tmp/llm_probe_targets.txt" -o ".tmp/llm_probe_targets.txt" 2>/dev/null || true
@@ -2768,9 +2812,13 @@ function password_dict() {
                     max_targets=0
                 fi
                 if [[ "$max_targets" -gt 0 ]]; then
-                    head -n "$max_targets" "webs/webs_all.txt" >".tmp/password_dict_targets.txt"
+                    head -n "$max_targets" "webs/webs_all.txt" | _filter_hostname_http_urls >".tmp/password_dict_targets.txt" || true
                 else
-                    cp "webs/webs_all.txt" ".tmp/password_dict_targets.txt"
+                    _filter_hostname_http_urls <"webs/webs_all.txt" >".tmp/password_dict_targets.txt" || true
+                fi
+
+                if [[ ! -s ".tmp/password_dict_targets.txt" ]]; then
+                    log_note "password_dict: no hostname web targets after filtering bare IPs" "${FUNCNAME[0]}" "${LINENO}"
                 fi
 
                 : >".tmp/password_dict_raw.txt"
