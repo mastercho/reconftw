@@ -2363,20 +2363,24 @@ function jschecks() {
             urless <.tmp/url_extract_js.txt \
                 | anew -q js/url_extract_js.txt 2>>"$LOGFILE" >/dev/null
 
+            # Strip trailing backslashes and :443 noise katana sometimes emits.
+            sed -E 's/\\+$//; s|^https://([^/:]+):443/|https://\1/|' js/url_extract_js.txt \
+                | awk 'NF' | sort -u >.tmp/js_urls_clean.txt
+
 	            [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]] && printf "%bRunning: Resolving JS URLs 2/6%b\n" "$yellow" "$reset"
 	            if [[ $AXIOM != true ]]; then
-	                if [[ -s "js/url_extract_js.txt" ]]; then
+	                if [[ -s ".tmp/js_urls_clean.txt" ]]; then
 	                    run_command httpx -follow-redirects -random-agent -silent -timeout "$HTTPX_TIMEOUT" -threads "$HTTPX_THREADS" \
-	                        -rl "$HTTPX_RATELIMIT" -status-code -content-type -retries 2 -no-color <js/url_extract_js.txt \
-	                        | awk '/\\[200\\]/ && /javascript/ {print $1}' | anew -q js/js_livelinks.txt || true
+	                        -rl "$HTTPX_RATELIMIT" -status-code -content-type -retries 2 -no-color <.tmp/js_urls_clean.txt \
+	                        | awk '/\[200\]/ && /javascript/i {print $1}' | anew -q js/js_livelinks.txt || true
 	                fi
 	            else
-	                if [[ -s "js/url_extract_js.txt" ]]; then
-	                    run_command axiom-scan js/url_extract_js.txt -m httpx -follow-host-redirects -H "$HEADER" -status-code \
+	                if [[ -s ".tmp/js_urls_clean.txt" ]]; then
+	                    run_command axiom-scan .tmp/js_urls_clean.txt -m httpx -follow-host-redirects -H "$HEADER" -status-code \
 	                        -threads "$HTTPX_THREADS" -rl "$HTTPX_RATELIMIT" -timeout "$HTTPX_TIMEOUT" -silent \
 	                        -content-type -retries 2 -no-color -o .tmp/js_livelinks.txt "$AXIOM_EXTRA_ARGS" 2>>"$LOGFILE" >/dev/null
 	                    if [[ -s ".tmp/js_livelinks.txt" ]]; then
-	                        awk '/\\[200\\]/ && /javascript/ {print $1}' .tmp/js_livelinks.txt | anew -q js/js_livelinks.txt || true
+	                        awk '/\[200\]/ && /javascript/i {print $1}' .tmp/js_livelinks.txt | anew -q js/js_livelinks.txt || true
 	                    fi
 	                fi
 	            fi
