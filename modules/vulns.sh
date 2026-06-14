@@ -11,7 +11,7 @@
 }
 
 # Build injectable URL list for sqlmap/commix/TInjA from gf output.
-# qsreplace -a emits FUZZ per parameter; fall back to raw parameterized URLs if needed.
+# Replace parameter values with FUZZ; fall back to raw parameterized URLs if needed.
 # Usage: _vulns_build_qsreplace_fuzz_list <source_gf_file> <dest_tmp_file>
 _vulns_build_qsreplace_fuzz_list() {
     local src="$1"
@@ -21,7 +21,7 @@ _vulns_build_qsreplace_fuzz_list() {
     [[ ! -s "$src" ]] && return 1
 
     if command -v qsreplace >/dev/null 2>&1; then
-        qsreplace -a "FUZZ" <"$src" 2>>"$LOGFILE" | grep -a 'FUZZ' | sed 's/\r$//' | anew -q "$dest"
+        qsreplace "FUZZ" <"$src" 2>>"$LOGFILE" | grep -a 'FUZZ' | sed 's/\r$//' | anew -q "$dest"
     fi
 
     if [[ ! -s "$dest" ]]; then
@@ -217,7 +217,7 @@ function ssrf_checks() {
                     _print_msg INFO "Running: FFUF for SSRF alternate protocols"
                     run_command ffuf -v -H "${HEADER}" -t "$FFUF_THREADS" -rate "$FFUF_RATELIMIT" -w ".tmp/tmp_ssrf_protocols.txt" -u "FUZZ" \
                         -mr "${SSRF_ALT_MATCH_REGEX:-169\\.254\\.169\\.254|latest/meta-data|root:|127\\.0\\.0\\.1|localhost|gopher://|dict://|file://}" 2>/dev/null \
-                        | grep "URL" | sed 's/| URL | //' | anew -q "vulns/ssrf_alt_protocols.txt"
+                        | grep -aF "| URL |" | sed 's/.*| URL | //' | anew -q "vulns/ssrf_alt_protocols.txt"
                 fi
             fi
 
@@ -330,7 +330,7 @@ function lfi() {
 
                 # Use Interlace to parallelize FFUF scanning
                 run_command interlace -tL ".tmp/tmp_lfi.txt" -threads "$INTERLACE_THREADS" -c "ffuf -v -r -t ${FFUF_THREADS} -rate ${FFUF_RATELIMIT} -H \"${HEADER}\" -w \"${lfi_wordlist}\" -u \"_target_\" -mr \"root:\" " 2>>"$LOGFILE" \
-                    | grep "URL" | sed 's/| URL | //' | anew -q "vulns/lfi.txt"
+                    | grep -aF "| URL |" | sed 's/.*| URL | //' | anew -q "vulns/lfi.txt"
 
                 end_func "Results are saved in vulns/lfi.txt" "${FUNCNAME[0]}"
             else
