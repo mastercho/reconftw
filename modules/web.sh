@@ -2424,6 +2424,46 @@ function jschecks() {
                     run_command axiom-scan js/js_livelinks.txt -m mantra -ua "$HEADER" -s -o js/js_secrets.txt "$AXIOM_EXTRA_ARGS" &>/dev/null
                 fi
                 mkdir -p .tmp/sourcemapper/secrets
+                rm -rf .tmp/js_trufflehog 2>/dev/null || true
+                mkdir -p .tmp/js_trufflehog
+                : >js/js_trufflehog_sources.tsv
+
+                local js_url js_hash js_file
+                while IFS= read -r js_url; do
+                    [[ -z "$js_url" ]] && continue
+
+                    js_hash=$(_hash_string "$js_url")
+                    js_file=".tmp/js_trufflehog/${js_hash}.js"
+
+                    if command -v curl >/dev/null 2>&1; then
+                        if ! curl -fsSL --compressed --max-time "${JS_DOWNLOAD_TIMEOUT:-30}" -A "$HEADER" "$js_url" -o "$js_file" 2>>"$LOGFILE"; then
+                            rm -f "$js_file" 2>/dev/null || true
+                            continue
+                        fi
+                    elif command -v wget >/dev/null 2>&1; then
+                        if ! wget -q -T "${JS_DOWNLOAD_TIMEOUT:-30}" -U "$HEADER" -O "$js_file" -- "$js_url" 2>>"$LOGFILE"; then
+                            rm -f "$js_file" 2>/dev/null || true
+                            continue
+                        fi
+                    else
+                        print_warnf "Neither curl nor wget is available; skipping live JS TruffleHog scan."
+                        break
+                    fi
+
+                    printf "%s\t%s\t%s\n" "$js_hash" "$js_file" "$js_url" >>js/js_trufflehog_sources.tsv
+                done < <(sort -u js/js_livelinks.txt)
+
+                if find .tmp/js_trufflehog -type f -name "*.js" -size +0c -print -quit 2>/dev/null | grep -q .; then
+                    if ! run_command trufflehog filesystem .tmp/js_trufflehog --json --results=verified,unknown,unverified 2>>"$LOGFILE" \
+                        | jq -c 'select(.DetectorName?)' \
+                        | anew -q js/js_secrets_trufflehog.jsonl; then
+                        run_command trufflehog filesystem .tmp/js_trufflehog -j 2>>"$LOGFILE" \
+                            | jq -c 'select(.DetectorName?)' \
+                            | anew -q js/js_secrets_trufflehog.jsonl || true
+                    fi
+                fi
+                rm -rf .tmp/js_trufflehog 2>/dev/null || true
+
                 if [[ -s "js/js_secrets.txt" ]]; then
                     # Parallel downloads instead of serial wget loop
                     cut -d' ' -f2 js/js_secrets.txt | xargs -P 10 -I {} wget -q -P .tmp/sourcemapper/secrets -- {} 2>/dev/null || true
@@ -2496,7 +2536,7 @@ function sub_js_extract() {
         done
 
         # Extract hostnames from JS secrets files (may reference internal hosts)
-        for f in js/js_secrets.txt js/js_secrets_jsmap.txt; do
+        for f in js/js_secrets.txt js/js_secrets_jsmap.txt js/js_secrets_trufflehog.jsonl; do
             if [[ -s "$f" ]]; then
                 grep -aoE '[a-zA-Z0-9][-a-zA-Z0-9]*(\.[a-zA-Z0-9][-a-zA-Z0-9]*)+' "$f" \
                     | grep -E "$DOMAIN_MATCH_REGEX" \
