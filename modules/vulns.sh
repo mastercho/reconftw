@@ -1290,12 +1290,12 @@ _wp_brute_add_username_passwords() {
 }
 
 # Priority list per target: username-as-password variants first, then short list + osint leaks.
-# Usage: _wp_brute_build_priority_wordlist <dest> <base_wordlist> <users_csv>
+# Usage: _wp_brute_build_priority_wordlist <dest> <base_wordlist> <users_csv> [user_pw_tmp]
 _wp_brute_build_priority_wordlist() {
     local dest="$1"
     local base_wordlist="$2"
     local users_csv="$3"
-    local tmp_users=".tmp/wp_brute_user_passwords.txt"
+    local tmp_users="${4:-.tmp/wp_brute_user_passwords.txt}"
 
     [[ -s "$base_wordlist" ]] || return 1
 
@@ -1307,6 +1307,105 @@ _wp_brute_build_priority_wordlist() {
     cat "$base_wordlist" >>"$dest"
     awk 'NF && !seen[$0]++' "$dest" >"${dest}.tmp" 2>/dev/null && mv "${dest}.tmp" "$dest"
     [[ -s "$dest" ]]
+}
+
+# Recon + spray for one nuclei WordPress target (safe to run in parallel per URL).
+_wp_brute_process_one_target() {
+    local target_url="$1"
+    local attack_wordlist="$2"
+    local company_name="$3"
+    local summary_file="$4"
+
+    local users_csv host_key out_dir scan_json_rel priority_wordlist user_pw_tmp target_log
+    local wordlist_count user_pw_count nuclei_users_csv wp_version xmlrpc_status waf_name
+
+    [[ -n "$target_url" && -s "$attack_wordlist" ]] || return 0
+
+    host_key=$(_wp_brute_safe_dirname "$target_url")
+    out_dir="${dir}/vulns/wp_brute/${host_key}"
+    scan_json_rel="vulns/wp_brute/${host_key}/scan.json"
+    user_pw_tmp=".tmp/wp_brute_user_passwords_${host_key}.txt"
+    target_log=".tmp/wp_brute_logs/${host_key}.log"
+    mkdir -p "$out_dir" ".tmp/wp_brute_logs"
+
+    {
+        _wp_brute_log_nuclei_provenance "$target_url"
+
+        _print_msg INFO "Running: wp-brute-pro recon on ${target_url}"
+        if ! _wp_brute_run_recon "$target_url" "$out_dir"; then
+            log_note "wp_brute_pro: recon failed for ${target_url}" "wp_brute_pro" "${LINENO}"
+            return 0
+        fi
+
+        if ! _wp_brute_scan_is_wordpress "$scan_json_rel"; then
+            log_note "wp_brute_pro: skipping ${target_url} (recon: not WordPress — no xmlrpc/login/wp version)" "wp_brute_pro" "${LINENO}"
+            return 0
+        fi
+
+        users_csv=$(jq -r '[.users[]?.slug // empty] | join(",")' "$scan_json_rel" 2>/dev/null)
+        nuclei_users_csv=""
+        if [[ -z "$users_csv" && ${WP_BRUTE_NUCLEI_USERS_FALLBACK:-true} == true ]]; then
+            nuclei_users_csv=$(_wp_brute_nuclei_users_csv "$target_url" 2>/dev/null || true)
+            if [[ -n "$nuclei_users_csv" ]]; then
+                users_csv="$nuclei_users_csv"
+                _print_msg INFO "wp_brute_pro: using nuclei wp-user-enum usernames for ${target_url}: ${users_csv}"
+            fi
+        fi
+        if [[ -z "$users_csv" ]]; then
+            log_note "wp_brute_pro: no users (Scanner + nuclei wp-user-enum) for ${target_url}" "wp_brute_pro" "${LINENO}"
+            return 0
+        fi
+
+        wp_version=$(jq -r '.wp_version // "unknown"' "$scan_json_rel" 2>/dev/null)
+        xmlrpc_status=$([[ $(jq -r '.xmlrpc_active // false' "$scan_json_rel" 2>/dev/null) == "true" ]] && echo active || echo disabled)
+        waf_name=$(jq -r '.waf_name // "none"' "$scan_json_rel" 2>/dev/null)
+        printf '%s | users=%s | wp=%s | xmlrpc=%s | waf=%s\n' \
+            "$target_url" "$users_csv" "$wp_version" "$xmlrpc_status" "$waf_name" \
+            | anew -q "$summary_file"
+
+        priority_wordlist=".tmp/wp_brute_priority_${host_key}.txt"
+        if ! _wp_brute_build_priority_wordlist "$priority_wordlist" "$attack_wordlist" "$users_csv" "$user_pw_tmp"; then
+            priority_wordlist="$attack_wordlist"
+        fi
+        wordlist_count=$(wc -l <"$priority_wordlist" | tr -d ' ')
+        user_pw_count=$(wc -l <"$user_pw_tmp" 2>/dev/null | tr -d ' ')
+        [[ -z "$user_pw_count" ]] && user_pw_count=0
+        _print_msg INFO "Running: wp-brute hybrid spray on ${target_url} (${wordlist_count} priority passwords incl. ${user_pw_count} username-as-pass variants, + smart generation, users: ${users_csv})"
+        _wp_brute_run_hybrid_spray "$target_url" "$out_dir" "$priority_wordlist" "$company_name" "$users_csv" || true
+
+        if [[ -s "${out_dir}/found.txt" ]]; then
+            cat "${out_dir}/found.txt" | anew -q "vulns/wp_brute/found.txt"
+        fi
+    } >>"$target_log" 2>&1
+
+    cat "$target_log" >>"$LOGFILE" 2>/dev/null || true
+}
+
+# Run wp_brute target workers with a concurrency cap (default 3).
+_wp_brute_run_targets_parallel() {
+    local attack_wordlist="$1"
+    local company_name="$2"
+    local summary_file="$3"
+    local max_jobs="${WP_BRUTE_PARALLEL:-3}"
+    local target_url running
+
+    [[ "$max_jobs" =~ ^[0-9]+$ ]] || max_jobs=3
+    ((max_jobs < 1)) && max_jobs=1
+
+    _print_msg INFO "wp_brute_pro: spraying up to ${max_jobs} WordPress target(s) in parallel"
+
+    while IFS= read -r target_url; do
+        [[ -z "$target_url" ]] && continue
+        while true; do
+            running=$(jobs -rp 2>/dev/null | wc -l | tr -d ' ')
+            [[ -z "$running" ]] && running=0
+            ((running < max_jobs)) && break
+            sleep 2
+        done
+        _wp_brute_process_one_target "$target_url" "$attack_wordlist" "$company_name" "$summary_file" &
+    done <".tmp/wp_brute_targets.txt"
+
+    wait 2>/dev/null || true
 }
 
 # Spray: merged short+osint passwords first, then wp-brute-pro smart wordlist generation.
@@ -1401,7 +1500,7 @@ function wp_brute_pro() {
 
         start_func "${FUNCNAME[0]}" "WordPress recon/brute (wp-brute-pro)"
 
-        local target_url users_csv company_name host_key out_dir summary_file attack_wordlist priority_wordlist scan_json_rel
+        local target_url users_csv company_name host_key out_dir summary_file attack_wordlist scan_json_rel
         : >"vulns/wp_brute/summary.txt"
         summary_file="vulns/wp_brute/summary.txt"
 
@@ -1414,62 +1513,7 @@ function wp_brute_pro() {
         company_name="${domain%%.*}"
         _wp_brute_collect_nuclei_users
 
-        while IFS= read -r target_url; do
-            [[ -z "$target_url" ]] && continue
-            host_key=$(_wp_brute_safe_dirname "$target_url")
-            out_dir="${dir}/vulns/wp_brute/${host_key}"
-            scan_json_rel="vulns/wp_brute/${host_key}/scan.json"
-            mkdir -p "$out_dir"
-
-            _wp_brute_log_nuclei_provenance "$target_url"
-
-            _print_msg INFO "Running: wp-brute-pro recon on ${target_url}"
-            if ! _wp_brute_run_recon "$target_url" "$out_dir"; then
-                log_note "wp_brute_pro: recon failed for ${target_url}" "${FUNCNAME[0]}" "${LINENO}"
-                continue
-            fi
-
-            if ! _wp_brute_scan_is_wordpress "$scan_json_rel"; then
-                log_note "wp_brute_pro: skipping ${target_url} (recon: not WordPress — no xmlrpc/login/wp version)" "${FUNCNAME[0]}" "${LINENO}"
-                continue
-            fi
-
-            users_csv=$(jq -r '[.users[]?.slug // empty] | join(",")' "$scan_json_rel" 2>/dev/null)
-            local nuclei_users_csv=""
-            if [[ -z "$users_csv" && ${WP_BRUTE_NUCLEI_USERS_FALLBACK:-true} == true ]]; then
-                nuclei_users_csv=$(_wp_brute_nuclei_users_csv "$target_url" 2>/dev/null || true)
-                if [[ -n "$nuclei_users_csv" ]]; then
-                    users_csv="$nuclei_users_csv"
-                    _print_msg INFO "wp_brute_pro: using nuclei wp-user-enum usernames for ${target_url}: ${users_csv}"
-                fi
-            fi
-            if [[ -z "$users_csv" ]]; then
-                log_note "wp_brute_pro: no users (Scanner + nuclei wp-user-enum) for ${target_url}" "${FUNCNAME[0]}" "${LINENO}"
-                continue
-            fi
-            local wp_version xmlrpc_status waf_name
-            wp_version=$(jq -r '.wp_version // "unknown"' "$scan_json_rel" 2>/dev/null)
-            xmlrpc_status=$([[ $(jq -r '.xmlrpc_active // false' "$scan_json_rel" 2>/dev/null) == "true" ]] && echo active || echo disabled)
-            waf_name=$(jq -r '.waf_name // "none"' "$scan_json_rel" 2>/dev/null)
-            printf '%s | users=%s | wp=%s | xmlrpc=%s | waf=%s\n' \
-                "$target_url" "$users_csv" "$wp_version" "$xmlrpc_status" "$waf_name" \
-                | anew -q "$summary_file"
-
-            local wordlist_count user_pw_count
-            priority_wordlist=".tmp/wp_brute_priority_${host_key}.txt"
-            if ! _wp_brute_build_priority_wordlist "$priority_wordlist" "$attack_wordlist" "$users_csv"; then
-                priority_wordlist="$attack_wordlist"
-            fi
-            wordlist_count=$(wc -l <"$priority_wordlist" | tr -d ' ')
-            user_pw_count=$(wc -l <".tmp/wp_brute_user_passwords.txt" 2>/dev/null | tr -d ' ')
-            [[ -z "$user_pw_count" ]] && user_pw_count=0
-            _print_msg INFO "Running: wp-brute hybrid spray on ${target_url} (${wordlist_count} priority passwords incl. ${user_pw_count} username-as-pass variants, + smart generation, users: ${users_csv})"
-            _wp_brute_run_hybrid_spray "$target_url" "$out_dir" "$priority_wordlist" "$company_name" "$users_csv" >>"$LOGFILE" 2>&1 || true
-
-            if [[ -s "${out_dir}/found.txt" ]]; then
-                cat "${out_dir}/found.txt" | anew -q "vulns/wp_brute/found.txt"
-            fi
-        done <".tmp/wp_brute_targets.txt"
+        _wp_brute_run_targets_parallel "$attack_wordlist" "$company_name" "$summary_file"
 
         end_func "Results are saved in vulns/wp_brute/ (summary.txt, scan.json, found.txt)" "${FUNCNAME[0]}"
     else
