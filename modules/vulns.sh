@@ -1309,6 +1309,63 @@ _wp_brute_build_priority_wordlist() {
     [[ -s "$dest" ]]
 }
 
+# Recon only (phase 1) for one target URL.
+_wp_brute_recon_one_target() {
+    local target_url="$1"
+    local host_key out_dir
+
+    [[ -n "$target_url" ]] || return 0
+
+    host_key=$(_wp_brute_safe_dirname "$target_url")
+    out_dir="${dir}/vulns/wp_brute/${host_key}"
+    mkdir -p "$out_dir"
+
+    _wp_brute_run_recon "$target_url" "$out_dir" || true
+}
+
+# Parallel recon pass (used when nuclei found more WP targets than WP_BRUTE_MAX_TARGETS).
+_wp_brute_recon_all_parallel() {
+    local max_jobs="${WP_BRUTE_PARALLEL:-3}"
+    local target_url running
+
+    [[ "$max_jobs" =~ ^[0-9]+$ ]] || max_jobs=3
+    ((max_jobs < 1)) && max_jobs=1
+
+    _print_msg INFO "wp_brute_pro: parallel recon on $(wc -l <".tmp/wp_brute_targets_all.txt" | tr -d ' ') target(s) (xmlrpc triage)"
+
+    while IFS= read -r target_url; do
+        [[ -z "$target_url" ]] && continue
+        while true; do
+            running=$(jobs -rp 2>/dev/null | wc -l | tr -d ' ')
+            [[ -z "$running" ]] && running=0
+            ((running < max_jobs)) && break
+            sleep 2
+        done
+        _wp_brute_recon_one_target "$target_url" &
+    done <".tmp/wp_brute_targets_all.txt"
+
+    wait 2>/dev/null || true
+}
+
+# Keep only targets whose recon scan.json reports xmlrpc_active.
+_wp_brute_collect_xmlrpc_active_targets() {
+    local target_url host_key scan_json
+
+    : >".tmp/wp_brute_targets_xmlrpc.txt"
+
+    while IFS= read -r target_url; do
+        [[ -z "$target_url" ]] && continue
+        host_key=$(_wp_brute_safe_dirname "$target_url")
+        scan_json="vulns/wp_brute/${host_key}/scan.json"
+        [[ -s "$scan_json" ]] || continue
+        [[ $(jq -r '.xmlrpc_active // false' "$scan_json" 2>/dev/null) == "true" ]] \
+            || continue
+        printf '%s\n' "$target_url" | anew -q ".tmp/wp_brute_targets_xmlrpc.txt" || true
+    done <".tmp/wp_brute_targets_all.txt"
+
+    sort -u ".tmp/wp_brute_targets_xmlrpc.txt" -o ".tmp/wp_brute_targets_xmlrpc.txt" 2>/dev/null || true
+}
+
 # Recon + spray for one nuclei WordPress target (safe to run in parallel per URL).
 _wp_brute_process_one_target() {
     local target_url="$1"
@@ -1331,10 +1388,12 @@ _wp_brute_process_one_target() {
     {
         _wp_brute_log_nuclei_provenance "$target_url"
 
-        _print_msg INFO "Running: wp-brute-pro recon on ${target_url}"
-        if ! _wp_brute_run_recon "$target_url" "$out_dir"; then
-            log_note "wp_brute_pro: recon failed for ${target_url}" "wp_brute_pro" "${LINENO}"
-            return 0
+        if [[ ! -s "$scan_json_rel" ]]; then
+            _print_msg INFO "Running: wp-brute-pro recon on ${target_url}"
+            if ! _wp_brute_run_recon "$target_url" "$out_dir"; then
+                log_note "wp_brute_pro: recon failed for ${target_url}" "wp_brute_pro" "${LINENO}"
+                return 0
+            fi
         fi
 
         if ! _wp_brute_scan_is_wordpress "$scan_json_rel"; then
@@ -1491,11 +1550,21 @@ function wp_brute_pro() {
             return 0
         fi
 
-        local target_count
-        target_count=$(wc -l <".tmp/wp_brute_targets.txt" | tr -d ' ')
+        cp ".tmp/wp_brute_targets.txt" ".tmp/wp_brute_targets_all.txt" 2>/dev/null || true
+
+        local target_count xmlrpc_count
+        target_count=$(wc -l <".tmp/wp_brute_targets_all.txt" | tr -d ' ')
         if [[ $DEEP != true ]] && [[ "$target_count" -gt "${WP_BRUTE_MAX_TARGETS:-5}" ]]; then
-            end_func "Skipping wp_brute_pro: ${target_count} WordPress nuclei targets (limit ${WP_BRUTE_MAX_TARGETS:-5}, use --deep)." "${FUNCNAME[0]}"
-            return 0
+            _wp_brute_recon_all_parallel
+            _wp_brute_collect_xmlrpc_active_targets
+            xmlrpc_count=$(wc -l <".tmp/wp_brute_targets_xmlrpc.txt" 2>/dev/null | tr -d ' ')
+            [[ -z "$xmlrpc_count" ]] && xmlrpc_count=0
+            if ((xmlrpc_count == 0)); then
+                end_func "Skipping wp_brute_pro: ${target_count} nuclei WP targets, none with xmlrpc active (use --deep for all)." "${FUNCNAME[0]}"
+                return 0
+            fi
+            cp ".tmp/wp_brute_targets_xmlrpc.txt" ".tmp/wp_brute_targets.txt"
+            _print_msg INFO "wp_brute_pro: ${xmlrpc_count} xmlrpc-active target(s) selected (WP_BRUTE_MAX_TARGETS bypass, was ${target_count})"
         fi
 
         start_func "${FUNCNAME[0]}" "WordPress recon/brute (wp-brute-pro)"

@@ -578,9 +578,20 @@ run_module_with_axiom_failover() {
     return "$rc"
 }
 
+function vulns_prepare_url_inputs() {
+    # Arjun + gf patterns feed sqli/lfi/xss/ssrf modules — run only in vulns phase (-a), not recon (-r).
+    if [[ ${PARAM_DISCOVERY:-true} == true ]]; then
+        run_module_with_axiom_failover param_discovery
+    fi
+    if [[ ${URL_GF:-true} == true ]]; then
+        url_gf
+    fi
+}
+
 function vulns() {
     _print_section "Vulnerability Checks"
     if [[ $VULNS_GENERAL == true ]]; then
+        vulns_prepare_url_inputs
         if [[ "${PARALLEL_MODE:-true}" == "true" ]] && declare -f parallel_funcs &>/dev/null && ! axiom_runtime_enabled; then
             # Parallel execution - group independent checks
             [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]] && printf "%b[*] Running vulnerability checks in parallel mode%b\n" "$bblue" "$reset"
@@ -636,6 +647,7 @@ function vulns() {
             run_module_with_axiom_failover brokenLinks
             run_module_with_axiom_failover fuzzparams
             run_module_with_axiom_failover nuclei_dast
+            wp_brute_pro
             4xxbypass
             test_ssl
         fi
@@ -840,7 +852,6 @@ function recon() {
         sub_js_extract
         well_known_pivots
         websocket_checks
-        run_module_with_axiom_failover param_discovery
         grpc_reflection
         llm_probe
 
@@ -855,7 +866,6 @@ function recon() {
     _print_section "Finalization"
 
     cms_scanner
-    url_gf
     wordlist_gen
     wordlist_gen_roboxtractor
     password_dict
@@ -1071,7 +1081,6 @@ function multi_recon() {
             exit 1
         }
         cms_scanner
-        url_gf
         wordlist_gen
         wordlist_gen_roboxtractor
         password_dict
@@ -1224,12 +1233,10 @@ function webs_menu() {
     cms_scanner
     run_module_with_axiom_failover iishortname
     run_module_with_axiom_failover urlchecks
-    run_module_with_axiom_failover param_discovery
     run_module_with_axiom_failover jschecks
     sub_js_extract
     well_known_pivots
     websocket_checks
-    url_gf
     wordlist_gen
     wordlist_gen_roboxtractor
     password_dict
