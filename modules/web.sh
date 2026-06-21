@@ -2454,13 +2454,8 @@ function jschecks() {
                 done < <(sort -u js/js_livelinks.txt)
 
                 if find .tmp/js_trufflehog -type f -name "*.js" -size +0c -print -quit 2>/dev/null | grep -q .; then
-                    if ! run_command trufflehog filesystem .tmp/js_trufflehog --json --results=verified,unknown,unverified 2>>"$LOGFILE" \
-                        | jq -c 'select(.DetectorName?)' \
-                        | anew -q js/js_secrets_trufflehog.jsonl; then
-                        run_command trufflehog filesystem .tmp/js_trufflehog -j 2>>"$LOGFILE" \
-                            | jq -c 'select(.DetectorName?)' \
-                            | anew -q js/js_secrets_trufflehog.jsonl || true
-                    fi
+                    _trufflehog_scan_filesystem_verified .tmp/js_trufflehog \
+                        | anew -q js/js_secrets_trufflehog.jsonl || true
                 fi
                 rm -rf .tmp/js_trufflehog 2>/dev/null || true
 
@@ -2468,7 +2463,8 @@ function jschecks() {
                     # Parallel downloads instead of serial wget loop
                     cut -d' ' -f2 js/js_secrets.txt | xargs -P 10 -I {} wget -q -P .tmp/sourcemapper/secrets -- {} 2>/dev/null || true
                 fi
-                run_command trufflehog filesystem .tmp/sourcemapper/ -j 2>/dev/null | jq -c | anew -q js/js_secrets_jsmap.txt
+                _trufflehog_scan_filesystem_verified .tmp/sourcemapper/ \
+                    | anew -q js/js_secrets_jsmap.txt || true
                 find .tmp/sourcemapper/ -type f -name "*.js" | run_command jsluice secrets -j --patterns="${PATTERNS_DIR}/jsluice_patterns.json" | anew -q js/js_secrets_jsmap_jsluice.txt
             fi
 

@@ -428,6 +428,22 @@ function run_command() {
     fi
 }
 
+# Trufflehog filesystem scan: verified secrets only (stdout JSON lines).
+_trufflehog_scan_filesystem_verified() {
+    local target="$1"
+    local verified_jq='select((.Verified // .verified) == true)'
+
+    [[ -n "$target" && -e "$target" ]] || return 0
+
+    if run_command trufflehog filesystem "$target" --json --results=verified 2>>"$LOGFILE" \
+        | jq -c "$verified_jq" 2>/dev/null; then
+        return 0
+    fi
+
+    run_command trufflehog filesystem "$target" -j 2>>"$LOGFILE" \
+        | jq -c "$verified_jq" 2>/dev/null || true
+}
+
 # Cross-platform sed_i wrapper
 # Usage: sed_i 's/old/new/g' file.txt
 # Works on both macOS (BSD sed) and Linux (GNU sed)

@@ -427,16 +427,19 @@ function apileaks() {
             return
         fi
 
-            # Analyze leaks with trufflehog
+            # Analyze leaks with trufflehog (verified secrets only)
             if [[ -s "${dir}/osint/postman_leaks.txt" ]]; then
-                run_command trufflehog filesystem "${dir}/osint/postman_leaks.txt" -j 2>/dev/null | jq -c | anew -q "${dir}/osint/postman_leaks_trufflehog.json"
+                _trufflehog_scan_filesystem_verified "${dir}/osint/postman_leaks.txt" \
+                    | anew -q "${dir}/osint/postman_leaks_trufflehog.json"
             fi
             if [[ -d "${dir}/osint/postman_leaks_postleaksng" ]]; then
-                run_command trufflehog filesystem "${dir}/osint/postman_leaks_postleaksng" -j 2>/dev/null | jq -c | anew -q "${dir}/osint/postman_leaks_trufflehog.json"
+                _trufflehog_scan_filesystem_verified "${dir}/osint/postman_leaks_postleaksng" \
+                    | anew -q "${dir}/osint/postman_leaks_trufflehog.json"
             fi
-        
+
             if [[ -s "${dir}/osint/swagger_leaks.txt" ]]; then
-                run_command trufflehog filesystem "${dir}/osint/swagger_leaks.txt" -j 2>/dev/null | jq -c | anew -q "${dir}/osint/swagger_leaks_trufflehog.json"
+                _trufflehog_scan_filesystem_verified "${dir}/osint/swagger_leaks.txt" \
+                    | anew -q "${dir}/osint/swagger_leaks_trufflehog.json"
             fi
                 end_func "Results are saved in $domain/osint/[postman_leaks_trufflehog.json, swagger_leaks_trufflehog.json]" "${FUNCNAME[0]}"
     else
