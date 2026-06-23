@@ -578,13 +578,43 @@ run_module_with_axiom_failover() {
     return "$rc"
 }
 
+_vulns_gf_outputs_ready() {
+    local f
+    for f in gf/sqli.txt gf/lfi.txt gf/xss.txt gf/ssrf.txt; do
+        [[ -s "$f" ]] && return 0
+    done
+    return 1
+}
+
 function vulns_prepare_url_inputs() {
     # Arjun + gf patterns feed sqli/lfi/xss/ssrf modules — run only in vulns phase (-a), not recon (-r).
+    _print_section "Vulnerability URL Prep"
+
+    local force_prep=false
+    local _saved_diff _had_diff=false
+    [[ -v DIFF ]] && _had_diff=true && _saved_diff="$DIFF"
+
+    if ! _vulns_gf_outputs_ready; then
+        force_prep=true
+        [[ "${OUTPUT_VERBOSITY:-1}" -ge 1 ]] && \
+            _print_msg INFO "gf/ outputs missing or empty; forcing param_discovery and url_gf (ignoring recon cache)"
+        rm -f "${called_fn_dir:-.called_fn}/.url_gf" "${called_fn_dir:-.called_fn}/.param_discovery" 2>/dev/null || true
+        DIFF=true
+    fi
+
     if [[ ${PARAM_DISCOVERY:-true} == true ]]; then
         run_module_with_axiom_failover param_discovery
     fi
     if [[ ${URL_GF:-true} == true ]]; then
         url_gf
+    fi
+
+    if [[ "$force_prep" == true ]]; then
+        if [[ "$_had_diff" == true ]]; then
+            DIFF="$_saved_diff"
+        else
+            unset DIFF
+        fi
     fi
 }
 
@@ -871,7 +901,7 @@ function recon() {
     password_dict
     url_ext
 
-    ui_module_end "Finalization" "webs/" "gf/" "cms/"
+    ui_module_end "Finalization" "webs/" "cms/"
     progress_module "Finalization"
 }
 

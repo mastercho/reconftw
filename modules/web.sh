@@ -1554,6 +1554,10 @@ function param_discovery() {
 
                 notification "Parameter discovery merged: ${arjun_added} new parameterized URLs" "info"
             fi
+        else
+            end_func "No URL input found, parameter discovery skipped." "${FUNCNAME[0]}" "SKIP_NOINPUT"
+            rm -f "$called_fn_dir/.${FUNCNAME[0]}" 2>/dev/null || true
+            return 0
         fi
         end_func "Results are saved in webs/params_discovered.txt" "${FUNCNAME[0]}"
     else
@@ -2230,7 +2234,8 @@ function url_gf() {
             fi
 
         else
-            end_func "No webs/url_extract.txt file found, URL_GF check skipped." "${FUNCNAME[0]}"
+            end_func "No webs/url_extract.txt file found, URL_GF check skipped." "${FUNCNAME[0]}" "SKIP_NOINPUT"
+            rm -f "$called_fn_dir/.${FUNCNAME[0]}" 2>/dev/null || true
             return
         fi
 
