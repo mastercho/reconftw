@@ -32,6 +32,18 @@ _vulns_build_qsreplace_fuzz_list() {
     [[ -s "$dest" ]]
 }
 
+# Merge per-target ghauri part logs into vulns/ghauri_log.txt (safe after crash or success).
+_vulns_merge_ghauri_parts() {
+    local log="vulns/ghauri_log.txt"
+    local part
+
+    [[ -d .tmp/ghauri_parts ]] || return 0
+    for part in .tmp/ghauri_parts/*.txt; do
+        [[ -f "$part" ]] || continue
+        cat "$part" >>"$log" 2>/dev/null || true
+    done
+}
+
 # Pull confirmed SQLi lines from merged ghauri output into vulns/ghauri.txt (only when hits exist).
 _vulns_collect_ghauri_findings() {
     local log="vulns/ghauri_log.txt"
@@ -65,6 +77,12 @@ _vulns_collect_ghauri_findings() {
         sub(/\r$/, "", line)
         sub(/\. Do you want.*$/, ".", line)
         sub(/ is vulnerable\..*$/, " is vulnerable.", line)
+        if (url != "") print url " | " line
+        else print line
+    }
+    /current database:|available databases|fetching database names|back-end DBMS/i {
+        line = $0
+        sub(/\r$/, "", line)
         if (url != "") print url " | " line
         else print line
     }
@@ -461,70 +479,193 @@ function ssti() {
 
 }
 
-function sqli() {
+# Legacy single .sqli marker → per-engine markers (sqlmap only if log dir exists; ghauri only if log exists).
+_sqli_migrate_legacy_cache() {
+    [[ -f "${called_fn_dir:-.called_fn}/.sqli" ]] || return 0
+    [[ ! -f "${called_fn_dir}/.sqli_sqlmap" ]] && touch "${called_fn_dir}/.sqli_sqlmap"
+    if [[ ! -f "${called_fn_dir}/.sqli_ghauri" ]] && [[ -s "vulns/ghauri_log.txt" ]]; then
+        touch "${called_fn_dir}/.sqli_ghauri"
+    fi
+}
 
-    # Create necessary directories
-    if ! ensure_dirs .tmp gf vulns; then return 1; fi
+# Build .tmp/tmp_sqli.txt from gf/sqli.txt; honor DEEP_LIMIT.
+_sqli_prepare_targets() {
+    if ! ensure_dirs .tmp gf vulns; then
+        return 1
+    fi
 
-    # Check if the function should run
-    if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $SQLI == true ]] \
-        && [[ -s "gf/sqli.txt" ]] && ! [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ ! -s "gf/sqli.txt" ]]; then
+        return 1
+    fi
 
-        start_func "${FUNCNAME[0]}" "SQLi Checks"
-
-        # Ensure gf/sqli.txt is not empty
-        if [[ -s "gf/sqli.txt" ]]; then
-            _print_msg INFO "Running: SQLi Payload Generation"
-
-            # Process sqli.txt with qsreplace and filter lines containing 'FUZZ'
-            if ! _vulns_build_qsreplace_fuzz_list "gf/sqli.txt" ".tmp/tmp_sqli.txt"; then
-                end_func "SQLi: no injectable query parameters in gf/sqli.txt after FUZZ prep (need URLs with ?param=)." "${FUNCNAME[0]}" "SKIP_NOINPUT"
-                return 0
-            fi
-
-            # Determine whether to proceed based on DEEP flag or number of URLs
-            URL_COUNT=$(wc -l <".tmp/tmp_sqli.txt")
-            if [[ $DEEP == true ]] || [[ $URL_COUNT -le $DEEP_LIMIT ]]; then
-
-                    # Check if SQLMAP is enabled and run SQLMap
-                    if [[ $SQLMAP == true ]]; then
-                        _print_msg INFO "Running: SQLMap for SQLi Checks"
-                        run_command python3 "${tools}/sqlmap/sqlmap.py" -m ".tmp/tmp_sqli.txt" -b -o --smart \
-                            --batch --disable-coloring --random-agent --level=5 --risk=3 \
-                            --output-dir="vulns/sqlmap" 2>>"$LOGFILE" >/dev/null
-                    fi
-                                # Check if GHAURI is enabled and run Ghauri
-                if [[ $GHAURI == true ]]; then
-                    _print_msg INFO "Running: Ghauri for SQLi Checks"
-                    mkdir -p .tmp/ghauri_parts vulns
-                    rm -rf .tmp/ghauri_parts/*
-                    # Quote _target_: URLs with & (e.g. ?a=FUZZ&b=FUZZ) break the shell if unquoted.
-                    run_command interlace -tL ".tmp/tmp_sqli.txt" -threads "$INTERLACE_THREADS" -c "printf '%s\n' '=== TARGET: _target_ ===' >> .tmp/ghauri_parts/_cleantarget_.txt; ghauri -u \"_target_\" --batch --dbs -H \"${HEADER}\" --force-ssl >> .tmp/ghauri_parts/_cleantarget_.txt 2>&1" 2>>"$LOGFILE" >/dev/null
-                    # One log file per sqli run (not appended across scans) so TARGET lines stay with findings
-                    : >vulns/ghauri_log.txt
-                    cat .tmp/ghauri_parts/*.txt 2>/dev/null >>vulns/ghauri_log.txt || true
-                    _vulns_collect_ghauri_findings || true
-                    rm -rf .tmp/ghauri_parts
-                fi
-
-                end_func "Results are saved in vulns/sqlmap folder" "${FUNCNAME[0]}"
-            else
-                end_func "Skipping SQLi: Too many URLs to test, try with --deep flag." "${FUNCNAME[0]}" "SKIP"
-            fi
-        else
-            end_func "No gf/sqli.txt file found, SQLi Checks skipped." "${FUNCNAME[0]}"
-            return
+    if [[ -s ".tmp/tmp_sqli.txt" ]]; then
+        local URL_COUNT
+        URL_COUNT=$(wc -l <".tmp/tmp_sqli.txt")
+        if [[ $DEEP == true ]] || [[ $URL_COUNT -le $DEEP_LIMIT ]]; then
+            return 0
         fi
-    else
+    fi
+
+    _print_msg INFO "Running: SQLi Payload Generation"
+    if ! _vulns_build_qsreplace_fuzz_list "gf/sqli.txt" ".tmp/tmp_sqli.txt"; then
+        _print_msg WARN "SQLi: no injectable query parameters in gf/sqli.txt after FUZZ prep (need URLs with ?param=)."
+        return 1
+    fi
+
+    local URL_COUNT
+    URL_COUNT=$(wc -l <".tmp/tmp_sqli.txt")
+    if [[ $DEEP != true ]] && [[ $URL_COUNT -gt $DEEP_LIMIT ]]; then
+        _print_msg WARN "SQLi: too many URLs (${URL_COUNT}), try with --deep flag."
+        return 1
+    fi
+
+    return 0
+}
+
+_sqli_ensure_targets() {
+    if [[ -s ".tmp/tmp_sqli.txt" ]]; then
+        local URL_COUNT
+        URL_COUNT=$(wc -l <".tmp/tmp_sqli.txt")
+        if [[ $DEEP == true ]] || [[ $URL_COUNT -le $DEEP_LIMIT ]]; then
+            return 0
+        fi
+    fi
+    _sqli_prepare_targets
+}
+
+function sqli_sqlmap() {
+    local fn="sqli_sqlmap"
+
+    if [[ $SQLI != true ]] || [[ $SQLMAP != true ]] \
+        || [[ ! -s "gf/sqli.txt" ]] || [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        if [[ $SQLMAP == false ]]; then
+            skip_notification "disabled"
+        elif [[ $SQLI == false ]]; then
+            skip_notification "disabled"
+        elif [[ ! -s "gf/sqli.txt" ]]; then
+            skip_notification "noinput"
+        fi
+        return 0
+    fi
+
+    if [[ -f "$called_fn_dir/.${fn}" ]] && [[ $DIFF != true ]]; then
+        skip_notification "processed"
+        return 0
+    fi
+
+    if ! _sqli_ensure_targets; then
+        end_func "SQLi: no targets for sqlmap." "$fn" "SKIP_NOINPUT"
+        return 0
+    fi
+
+    start_func "$fn" "SQLMap SQLi Checks"
+    _print_msg INFO "Running: SQLMap for SQLi Checks"
+    run_command python3 "${tools}/sqlmap/sqlmap.py" -m ".tmp/tmp_sqli.txt" -b -o --smart \
+        --batch --disable-coloring --random-agent --level=5 --risk=3 \
+        --output-dir="vulns/sqlmap" 2>>"$LOGFILE" >/dev/null
+    end_func "Results are saved in vulns/sqlmap" "$fn"
+}
+
+function sqli_ghauri() {
+    local fn="sqli_ghauri"
+
+    if [[ $SQLI != true ]] || [[ $GHAURI != true ]] \
+        || [[ ! -s "gf/sqli.txt" ]] || [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        if [[ $GHAURI == false ]]; then
+            skip_notification "disabled"
+        elif [[ $SQLI == false ]]; then
+            skip_notification "disabled"
+        elif [[ ! -s "gf/sqli.txt" ]]; then
+            skip_notification "noinput"
+        fi
+        return 0
+    fi
+
+    if [[ -f "$called_fn_dir/.${fn}" ]] && [[ $DIFF != true ]]; then
+        skip_notification "processed"
+        return 0
+    fi
+
+    if ! command -v ghauri >/dev/null 2>&1; then
+        _print_msg WARN "${fn}: ghauri not found in PATH"
+        return 0
+    fi
+
+    if ! _sqli_ensure_targets; then
+        end_func "SQLi: no targets for ghauri." "$fn" "SKIP_NOINPUT"
+        return 0
+    fi
+
+    start_func "$fn" "Ghauri SQLi Checks"
+    _print_msg INFO "Running: Ghauri for SQLi Checks"
+    mkdir -p .tmp/ghauri_parts vulns
+    rm -rf .tmp/ghauri_parts/*
+    : >vulns/ghauri_log.txt
+    cp ".tmp/tmp_sqli.txt" vulns/ghauri_targets.txt 2>/dev/null || true
+
+    local ghauri_threads="${GHAURI_THREADS:-3}"
+    local ghauri_target_count=0
+    ghauri_target_count=$(wc -l <".tmp/tmp_sqli.txt" 2>/dev/null || echo 0)
+
+    if [[ ! -s ".tmp/tmp_sqli.txt" ]]; then
+        printf '%s\n' "No ghauri targets in .tmp/tmp_sqli.txt." >>vulns/ghauri_log.txt
+        end_func "No ghauri targets." "$fn" "SKIP_NOINPUT"
+        return 0
+    fi
+
+    local ghauri_confirm_flag=""
+    case "${GHAURI_CONFIRM:-current-db}" in
+        dbs|true)
+            ghauri_confirm_flag="--dbs"
+            ;;
+        current-db|current_db|currentdb)
+            ghauri_confirm_flag="--current-db"
+            ;;
+        none|false)
+            ghauri_confirm_flag=""
+            ;;
+    esac
+    [[ "${GHAURI_ENUM_DBS:-}" == "true" ]] && ghauri_confirm_flag="--dbs"
+
+    {
+        printf '=== GHAURI RUN %s ===\n' "$(date +'%Y-%m-%d %H:%M:%S')"
+        printf 'targets=%s threads=%s confirm=%s\n' \
+            "$ghauri_target_count" "$ghauri_threads" "${ghauri_confirm_flag:-none}"
+    } >>vulns/ghauri_log.txt
+
+    local _ghauri_merge_done=false
+    _ghauri_finalize_parts() {
+        [[ "$_ghauri_merge_done" == true ]] && return 0
+        _ghauri_merge_done=true
+        _vulns_merge_ghauri_parts || true
+        _vulns_collect_ghauri_findings || true
+        rm -rf .tmp/ghauri_parts 2>/dev/null || true
+    }
+    trap '_ghauri_finalize_parts' RETURN
+
+    run_command interlace -tL ".tmp/tmp_sqli.txt" -threads "$ghauri_threads" \
+        -c "printf '%s\n' '=== TARGET: _target_ ===' >> .tmp/ghauri_parts/_cleantarget_.txt; ghauri -u \"_target_\" --batch ${ghauri_confirm_flag} -H \"${HEADER}\" --force-ssl >> .tmp/ghauri_parts/_cleantarget_.txt 2>&1" \
+        2>>"$LOGFILE" >/dev/null || true
+
+    trap - RETURN
+    _ghauri_finalize_parts
+    end_func "Results are saved in vulns/ghauri_log.txt and vulns/ghauri.txt" "$fn"
+}
+
+function sqli() {
+    if [[ $SQLI != true ]] || [[ ! -s "gf/sqli.txt" ]] \
+        || [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         if [[ $SQLI == false ]]; then
             skip_notification "disabled"
         elif [[ ! -s "gf/sqli.txt" ]]; then
             skip_notification "noinput"
-        else
-            skip_notification "processed"
         fi
+        return 0
     fi
 
+    _sqli_migrate_legacy_cache
+    sqli_sqlmap
+    sqli_ghauri
 }
 
 function test_ssl() {
