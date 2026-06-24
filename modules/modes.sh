@@ -636,7 +636,7 @@ function vulns() {
                     return 1
                 fi
             fi
-            parallel_funcs "${PAR_VULNS_GROUP2_SIZE:-4}" ssti sqli command_injection smuggling
+            parallel_funcs "${PAR_VULNS_GROUP2_SIZE:-3}" ssti command_injection smuggling
             local vulns_g2_rc=$?
             if ((vulns_g2_rc > 0)); then
                 if [[ "${CONTINUE_ON_TOOL_ERROR:-true}" == "true" ]]; then
@@ -647,6 +647,8 @@ function vulns() {
                     return 1
                 fi
             fi
+            # sqlmap + ghauri are memory-heavy; run alone (not with commix/ssti/smuggling) to avoid OOM.
+            sqli
             parallel_funcs "${PAR_VULNS_GROUP4_SIZE:-3}" webcache spraying brokenLinks
             local vulns_g4_rc=$?
             if ((vulns_g4_rc > 0)); then
