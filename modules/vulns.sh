@@ -601,7 +601,6 @@ function sqli_ghauri() {
     mkdir -p .tmp/ghauri_parts vulns
     rm -rf .tmp/ghauri_parts/*
     : >vulns/ghauri_log.txt
-    cp ".tmp/tmp_sqli.txt" vulns/ghauri_targets.txt 2>/dev/null || true
 
     local ghauri_threads="${GHAURI_THREADS:-3}"
     local ghauri_target_count=0
