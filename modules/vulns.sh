@@ -44,53 +44,6 @@ _vulns_merge_ghauri_parts() {
     done
 }
 
-# Pull confirmed SQLi lines from merged ghauri output into vulns/ghauri.txt (only when hits exist).
-_vulns_collect_ghauri_findings() {
-    local log="vulns/ghauri_log.txt"
-    local out="vulns/ghauri.txt"
-
-    [[ -s "$log" ]] || return 1
-
-    awk '
-    function remember(line,    m) {
-        if (match(line, /https?:\/\/[^[:space:]'"'"'"]+/)) {
-            url = substr(line, RSTART, RLENGTH)
-            sub(/['"'"'"].*$/, "", url)
-        }
-    }
-    /^=== TARGET: / {
-        url = $0
-        sub(/^=== TARGET: /, "", url)
-        next
-    }
-    /\[INFO\].*testing|testing connection to the target URL|target URL/ {
-        remember($0)
-        next
-    }
-    /^https?:\/\// {
-        url = $0
-        sub(/[[:space:]].*$/, "", url)
-        next
-    }
-    /[Pp]arameter.+is vulnerable|identified the following injection|is vulnerable to SQL injection/ {
-        line = $0
-        sub(/\r$/, "", line)
-        sub(/\. Do you want.*$/, ".", line)
-        sub(/ is vulnerable\..*$/, " is vulnerable.", line)
-        if (url != "") print url " | " line
-        else print line
-    }
-    /current database:|available databases|fetching database names|back-end DBMS/i {
-        line = $0
-        sub(/\r$/, "", line)
-        if (url != "") print url " | " line
-        else print line
-    }
-    ' "$log" 2>/dev/null | anew -q "$out"
-
-    [[ -s "$out" ]]
-}
-
 function xss() {
 
     # Create necessary directories
@@ -669,6 +622,7 @@ function sqli_ghauri() {
     _print_msg INFO "Running: Ghauri for SQLi Checks"
     mkdir -p .tmp/ghauri_parts vulns
     rm -rf .tmp/ghauri_parts/*
+    rm -f vulns/ghauri.txt
     : >vulns/ghauri_log.txt
 
     local ghauri_target_count=0
@@ -711,7 +665,6 @@ function sqli_ghauri() {
         [[ "$_ghauri_merge_done" == true ]] && return 0
         _ghauri_merge_done=true
         _vulns_merge_ghauri_parts || true
-        _vulns_collect_ghauri_findings || true
         rm -rf .tmp/ghauri_parts 2>/dev/null || true
     }
     trap '_ghauri_finalize_parts' RETURN
@@ -720,7 +673,7 @@ function sqli_ghauri() {
 
     trap - RETURN
     _ghauri_finalize_parts
-    end_func "Results are saved in vulns/ghauri_log.txt and vulns/ghauri.txt" "$fn"
+    end_func "Results are saved in vulns/ghauri_log.txt" "$fn"
 }
 
 function sqli() {
