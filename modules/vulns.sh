@@ -533,6 +533,44 @@ _sqli_ensure_targets() {
     _sqli_prepare_targets
 }
 
+# Free RAM before ghauri (sqlmap may have just finished in sqli()).
+_sqli_prep_before_ghauri() {
+    pkill -f "ghauri -u" 2>/dev/null || true
+    sleep 2
+}
+
+# Run ghauri via interlace in URL batches; merge logs after each batch to cap peak RAM.
+_sqli_ghauri_run_batches() {
+    local list="$1"
+    local threads="$2"
+    local confirm_flag="$3"
+    local batch_size="${GHAURI_BATCH_SIZE:-25}"
+    local batch_file=".tmp/ghauri_batch.txt"
+    local total line_no=1 batch_num=0
+
+    total=$(wc -l <"$list" 2>/dev/null || echo 0)
+    [[ "$total" -eq 0 ]] && return 0
+
+    mkdir -p .tmp/ghauri_parts
+
+    while [[ $line_no -le $total ]]; do
+        batch_num=$((batch_num + 1))
+        sed -n "${line_no},$((line_no + batch_size - 1))p" "$list" >"$batch_file"
+        [[ ! -s "$batch_file" ]] && break
+
+        _print_msg INFO "Ghauri batch ${batch_num}: lines ${line_no}-$((line_no + $(wc -l <"$batch_file") - 1)) / ${total}"
+        run_command interlace -tL "$batch_file" -threads "$threads" \
+            -c "printf '%s\n' '=== TARGET: _target_ ===' >> .tmp/ghauri_parts/_cleantarget_.txt; ghauri -u \"_target_\" --batch ${confirm_flag} -H \"${HEADER}\" --force-ssl >> .tmp/ghauri_parts/_cleantarget_.txt 2>&1" \
+            2>>"$LOGFILE" >/dev/null || true
+
+        _vulns_merge_ghauri_parts || true
+        rm -rf .tmp/ghauri_parts/*
+        pkill -f "ghauri -u" 2>/dev/null || true
+        sleep 1
+        line_no=$((line_no + batch_size))
+    done
+}
+
 function sqli_sqlmap() {
     local fn="sqli_sqlmap"
 
@@ -596,15 +634,22 @@ function sqli_ghauri() {
         return 0
     fi
 
+    _sqli_prep_before_ghauri
+
     start_func "$fn" "Ghauri SQLi Checks"
     _print_msg INFO "Running: Ghauri for SQLi Checks"
     mkdir -p .tmp/ghauri_parts vulns
     rm -rf .tmp/ghauri_parts/*
     : >vulns/ghauri_log.txt
 
-    local ghauri_threads="${GHAURI_THREADS:-3}"
+    local ghauri_threads="${GHAURI_THREADS:-1}"
     local ghauri_target_count=0
     ghauri_target_count=$(wc -l <".tmp/tmp_sqli.txt" 2>/dev/null || echo 0)
+
+    if [[ "$ghauri_target_count" -gt 100 ]] && [[ "$ghauri_threads" -gt 1 ]]; then
+        _print_msg WARN "Ghauri: ${ghauri_target_count} targets — forcing 1 worker (OOM safety; was ${ghauri_threads})"
+        ghauri_threads=1
+    fi
 
     if [[ ! -s ".tmp/tmp_sqli.txt" ]]; then
         printf '%s\n' "No ghauri targets in .tmp/tmp_sqli.txt." >>vulns/ghauri_log.txt
@@ -628,8 +673,8 @@ function sqli_ghauri() {
 
     {
         printf '=== GHAURI RUN %s ===\n' "$(date +'%Y-%m-%d %H:%M:%S')"
-        printf 'targets=%s threads=%s confirm=%s\n' \
-            "$ghauri_target_count" "$ghauri_threads" "${ghauri_confirm_flag:-none}"
+        printf 'targets=%s threads=%s batch=%s confirm=%s\n' \
+            "$ghauri_target_count" "$ghauri_threads" "${GHAURI_BATCH_SIZE:-25}" "${ghauri_confirm_flag:-none}"
     } >>vulns/ghauri_log.txt
 
     local _ghauri_merge_done=false
@@ -642,9 +687,7 @@ function sqli_ghauri() {
     }
     trap '_ghauri_finalize_parts' RETURN
 
-    run_command interlace -tL ".tmp/tmp_sqli.txt" -threads "$ghauri_threads" \
-        -c "printf '%s\n' '=== TARGET: _target_ ===' >> .tmp/ghauri_parts/_cleantarget_.txt; ghauri -u \"_target_\" --batch ${ghauri_confirm_flag} -H \"${HEADER}\" --force-ssl >> .tmp/ghauri_parts/_cleantarget_.txt 2>&1" \
-        2>>"$LOGFILE" >/dev/null || true
+    _sqli_ghauri_run_batches ".tmp/tmp_sqli.txt" "$ghauri_threads" "$ghauri_confirm_flag"
 
     trap - RETURN
     _ghauri_finalize_parts
