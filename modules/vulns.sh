@@ -533,10 +533,40 @@ _sqli_ensure_targets() {
     _sqli_prepare_targets
 }
 
+# Pick interlace worker count from GHAURI_THREADS and available RAM ( ~700MB per worker ).
+_sqli_ghauri_pick_threads() {
+    local target_count="$1"
+    local want="${GHAURI_THREADS:-3}"
+    local avail_mb max_threads threads
+
+    avail_mb=$(awk '/MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+    if [[ "$avail_mb" -ge 12000 ]]; then
+        max_threads=4
+    elif [[ "$avail_mb" -ge 8000 ]]; then
+        max_threads=3
+    elif [[ "$avail_mb" -ge 5000 ]]; then
+        max_threads=2
+    elif [[ "$avail_mb" -gt 0 ]]; then
+        max_threads=1
+    else
+        max_threads=3
+    fi
+
+    threads="$want"
+    [[ "$threads" -gt "$max_threads" ]] && threads="$max_threads"
+
+    # Very large lists: avoid 3+ sustained workers even when RAM looks fine
+    if [[ "$target_count" -gt 1200 ]] && [[ "$threads" -gt 2 ]]; then
+        threads=2
+    fi
+
+    printf '%s' "$threads"
+}
+
 # Free RAM before ghauri (sqlmap may have just finished in sqli()).
 _sqli_prep_before_ghauri() {
     pkill -f "ghauri -u" 2>/dev/null || true
-    sleep 2
+    sleep 1
 }
 
 # Run ghauri via interlace in URL batches; merge logs after each batch to cap peak RAM.
@@ -544,7 +574,7 @@ _sqli_ghauri_run_batches() {
     local list="$1"
     local threads="$2"
     local confirm_flag="$3"
-    local batch_size="${GHAURI_BATCH_SIZE:-25}"
+    local batch_size="${GHAURI_BATCH_SIZE:-50}"
     local batch_file=".tmp/ghauri_batch.txt"
     local total line_no=1 batch_num=0
 
@@ -566,7 +596,6 @@ _sqli_ghauri_run_batches() {
         _vulns_merge_ghauri_parts || true
         rm -rf .tmp/ghauri_parts/*
         pkill -f "ghauri -u" 2>/dev/null || true
-        sleep 1
         line_no=$((line_no + batch_size))
     done
 }
@@ -642,13 +671,13 @@ function sqli_ghauri() {
     rm -rf .tmp/ghauri_parts/*
     : >vulns/ghauri_log.txt
 
-    local ghauri_threads="${GHAURI_THREADS:-1}"
     local ghauri_target_count=0
     ghauri_target_count=$(wc -l <".tmp/tmp_sqli.txt" 2>/dev/null || echo 0)
 
-    if [[ "$ghauri_target_count" -gt 100 ]] && [[ "$ghauri_threads" -gt 1 ]]; then
-        _print_msg WARN "Ghauri: ${ghauri_target_count} targets — forcing 1 worker (OOM safety; was ${ghauri_threads})"
-        ghauri_threads=1
+    local ghauri_threads
+    ghauri_threads=$(_sqli_ghauri_pick_threads "$ghauri_target_count")
+    if [[ "${GHAURI_THREADS:-3}" -gt "$ghauri_threads" ]]; then
+        _print_msg INFO "Ghauri: using ${ghauri_threads} worker(s) (${ghauri_target_count} targets, ~$(awk '/MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo '?')MB RAM available)"
     fi
 
     if [[ ! -s ".tmp/tmp_sqli.txt" ]]; then
@@ -674,7 +703,7 @@ function sqli_ghauri() {
     {
         printf '=== GHAURI RUN %s ===\n' "$(date +'%Y-%m-%d %H:%M:%S')"
         printf 'targets=%s threads=%s batch=%s confirm=%s\n' \
-            "$ghauri_target_count" "$ghauri_threads" "${GHAURI_BATCH_SIZE:-25}" "${ghauri_confirm_flag:-none}"
+            "$ghauri_target_count" "$ghauri_threads" "${GHAURI_BATCH_SIZE:-50}" "${ghauri_confirm_flag:-none}"
     } >>vulns/ghauri_log.txt
 
     local _ghauri_merge_done=false
