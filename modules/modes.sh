@@ -590,26 +590,38 @@ function vulns_prepare_url_inputs() {
     # Arjun + gf patterns feed sqli/lfi/xss/ssrf modules — run only in vulns phase (-a), not recon (-r).
     _print_section "Vulnerability URL Prep"
 
-    local force_prep=false
+    local force_url_gf=false
+    local force_param_discovery=false
     local _saved_diff _had_diff=false
     [[ -v DIFF ]] && _had_diff=true && _saved_diff="$DIFF"
 
     if ! _vulns_gf_outputs_ready; then
-        force_prep=true
+        force_url_gf=true
         [[ "${OUTPUT_VERBOSITY:-1}" -ge 1 ]] && \
-            _print_msg INFO "gf/ outputs missing or empty; forcing param_discovery and url_gf (ignoring recon cache)"
-        rm -f "${called_fn_dir:-.called_fn}/.url_gf" "${called_fn_dir:-.called_fn}/.param_discovery" 2>/dev/null || true
-        DIFF=true
+            _print_msg INFO "gf/ outputs missing or empty; forcing url_gf (param_discovery cache is respected)"
+        rm -f "${called_fn_dir:-.called_fn}/.url_gf" 2>/dev/null || true
+        if [[ ! -f "${called_fn_dir:-.called_fn}/.param_discovery" ]]; then
+            force_param_discovery=true
+        else
+            [[ "${OUTPUT_VERBOSITY:-1}" -ge 1 ]] && \
+                _print_msg INFO "param_discovery marker exists; skipping Arjun"
+        fi
     fi
 
     if [[ ${PARAM_DISCOVERY:-true} == true ]]; then
+        if [[ "$force_param_discovery" == true ]]; then
+            DIFF=true
+        fi
         run_module_with_axiom_failover param_discovery
     fi
     if [[ ${URL_GF:-true} == true ]]; then
+        if [[ "$force_url_gf" == true ]]; then
+            DIFF=true
+        fi
         url_gf
     fi
 
-    if [[ "$force_prep" == true ]]; then
+    if [[ "$force_url_gf" == true || "$force_param_discovery" == true ]]; then
         if [[ "$_had_diff" == true ]]; then
             DIFF="$_saved_diff"
         else
