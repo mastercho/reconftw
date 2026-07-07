@@ -889,7 +889,7 @@ _filter_noisy_ip_port_urls() {
     END {
         for (i = 1; i <= NR; i++) {
             delete parsed
-            if (parse_ip_port(lines[i], parsed) && port_count[parsed["ip"]] > threshold) {
+            if (parse_ip_port(lines[i], parsed) && port_count[parsed["ip"]] > threshold && parsed["port"] != "80" && parsed["port"] != "443") {
                 noisy[parsed["ip"]] = port_count[parsed["ip"]]
                 next
             }
