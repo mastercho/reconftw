@@ -480,6 +480,7 @@ function tools_installed() {
         ["crt"]="crt"
         ["gitleaks"]="gitleaks"
         ["trufflehog"]="trufflehog"
+        ["titus"]="titus"
         ["s3scanner"]="s3scanner"
         ["mantra"]="mantra"
         ["nmapurls"]="nmapurls"

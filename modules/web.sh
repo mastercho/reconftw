@@ -2542,6 +2542,8 @@ function jschecks() {
                 if find .tmp/js_trufflehog -type f -name "*.js" -size +0c -print -quit 2>/dev/null | grep -q .; then
                     _trufflehog_scan_filesystem_verified .tmp/js_trufflehog \
                         | anew -q js/js_secrets_trufflehog.jsonl || true
+                    _titus_scan_filesystem_json .tmp/js_trufflehog ".tmp/titus_js_live.ds" \
+                        >js/js_secrets_titus_live.json || true
                 fi
                 rm -rf .tmp/js_trufflehog 2>/dev/null || true
 
@@ -2551,6 +2553,8 @@ function jschecks() {
                 fi
                 _trufflehog_scan_filesystem_verified .tmp/sourcemapper/ \
                     | anew -q js/js_secrets_jsmap.txt || true
+                _titus_scan_filesystem_json .tmp/sourcemapper/ ".tmp/titus_jsmap.ds" \
+                    >js/js_secrets_titus_jsmap.json || true
                 find .tmp/sourcemapper/ -type f -name "*.js" | run_command jsluice secrets -j --patterns="${PATTERNS_DIR}/jsluice_patterns.json" | anew -q js/js_secrets_jsmap_jsluice.txt
             fi
 

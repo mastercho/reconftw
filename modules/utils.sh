@@ -444,6 +444,22 @@ _trufflehog_scan_filesystem_verified() {
         | jq -c "$verified_jq" 2>/dev/null || true
 }
 
+# Titus filesystem scan (stdout JSON). Optional: only runs when titus is installed.
+_titus_scan_filesystem_json() {
+    local target="$1"
+    local datastore="${2:-}"
+
+    [[ -n "$target" && -e "$target" ]] || return 0
+    command -v titus >/dev/null 2>&1 || return 0
+
+    if [[ -n "$datastore" ]]; then
+        rm -f "$datastore" 2>/dev/null || true
+        run_command titus scan "$target" --format json --datastore "$datastore" 2>>"$LOGFILE" || true
+    else
+        run_command titus scan "$target" --format json 2>>"$LOGFILE" || true
+    fi
+}
+
 # Cross-platform sed_i wrapper
 # Usage: sed_i 's/old/new/g' file.txt
 # Works on both macOS (BSD sed) and Linux (GNU sed)
