@@ -486,6 +486,42 @@ _sqli_ensure_targets() {
     _sqli_prepare_targets
 }
 
+_sqli_has_crawl_roots() {
+    [[ ${SQLMAP_CRAWL_FALLBACK:-true} == true ]] || return 1
+    [[ -s "webs/webs_all.txt" || -s "webs/webs.txt" || -s "webs/webs_uncommon_ports.txt" ]]
+}
+
+_sqli_prepare_crawl_roots() {
+    local roots_file=".tmp/tmp_sqli_crawl_roots.txt"
+    local max_roots="${SQLMAP_CRAWL_MAX_ROOTS:-25}"
+
+    ensure_dirs .tmp webs || return 1
+    : >"$roots_file"
+
+    if [[ ! -s "webs/webs_all.txt" ]]; then
+        cat webs/webs.txt webs/webs_uncommon_ports.txt 2>/dev/null | sed '/^$/d' | sort -u >"webs/webs_all.txt" || true
+    fi
+
+    cat webs/webs_all.txt webs/webs.txt webs/webs_uncommon_ports.txt 2>/dev/null \
+        | grep -aE '^https?://' \
+        | sed 's/[[:space:]]*$//' \
+        | sort -u >"$roots_file" || true
+
+    [[ -s "$roots_file" ]] || return 1
+
+    if [[ $DEEP != true && "$max_roots" -gt 0 ]]; then
+        local root_count
+        root_count=$(wc -l <"$roots_file" 2>/dev/null || echo 0)
+        if [[ "$root_count" -gt "$max_roots" ]]; then
+            sed -n "1,${max_roots}p" "$roots_file" >"${roots_file}.cap"
+            mv "${roots_file}.cap" "$roots_file"
+            _print_msg WARN "SQLMap crawl fallback: capped web roots to ${max_roots} (set SQLMAP_CRAWL_MAX_ROOTS or use --deep for more)"
+        fi
+    fi
+
+    [[ -s "$roots_file" ]]
+}
+
 # Pick interlace worker count from GHAURI_THREADS and available RAM ( ~700MB per worker ).
 _sqli_ghauri_pick_threads() {
     local target_count="$1"
@@ -557,14 +593,17 @@ function sqli_sqlmap() {
     local fn="sqli_sqlmap"
 
     if [[ $SQLI != true ]] || [[ $SQLMAP != true ]] \
-        || [[ ! -s "gf/sqli.txt" ]] || [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        || [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         if [[ $SQLMAP == false ]]; then
             skip_notification "disabled"
         elif [[ $SQLI == false ]]; then
             skip_notification "disabled"
-        elif [[ ! -s "gf/sqli.txt" ]]; then
-            skip_notification "noinput"
         fi
+        return 0
+    fi
+
+    if [[ ! -s "gf/sqli.txt" ]] && ! _sqli_has_crawl_roots; then
+            skip_notification "noinput"
         return 0
     fi
 
@@ -573,16 +612,31 @@ function sqli_sqlmap() {
         return 0
     fi
 
+    local crawl_fallback=false
     if ! _sqli_ensure_targets; then
+        if _sqli_prepare_crawl_roots; then
+            crawl_fallback=true
+        else
         end_func "SQLi: no targets for sqlmap." "$fn" "SKIP_NOINPUT"
         return 0
+        fi
     fi
 
     start_func "$fn" "SQLMap SQLi Checks"
-    _print_msg INFO "Running: SQLMap for SQLi Checks"
-    run_command python3 "${tools}/sqlmap/sqlmap.py" -m ".tmp/tmp_sqli.txt" -b -o --smart \
-        --batch --disable-coloring --random-agent --level=5 --risk=3 \
-        --output-dir="vulns/sqlmap" 2>>"$LOGFILE" >/dev/null
+    if [[ "$crawl_fallback" == true ]]; then
+        local crawl_depth="${SQLMAP_CRAWL_DEPTH:-1}"
+        local crawl_roots_count
+        crawl_roots_count=$(wc -l <".tmp/tmp_sqli_crawl_roots.txt" 2>/dev/null || echo 0)
+        _print_msg INFO "Running: SQLMap crawl fallback (${crawl_roots_count} root(s), crawl depth ${crawl_depth})"
+        run_command python3 "${tools}/sqlmap/sqlmap.py" -m ".tmp/tmp_sqli_crawl_roots.txt" --crawl="$crawl_depth" --forms -b -o --smart \
+            --batch --disable-coloring --random-agent --level=3 --risk=2 \
+            --output-dir="vulns/sqlmap" 2>>"$LOGFILE" >/dev/null
+    else
+        _print_msg INFO "Running: SQLMap for SQLi Checks"
+        run_command python3 "${tools}/sqlmap/sqlmap.py" -m ".tmp/tmp_sqli.txt" -b -o --smart \
+            --batch --disable-coloring --random-agent --level=5 --risk=3 \
+            --output-dir="vulns/sqlmap" 2>>"$LOGFILE" >/dev/null
+    fi
     end_func "Results are saved in vulns/sqlmap" "$fn"
 }
 
@@ -677,13 +731,16 @@ function sqli_ghauri() {
 }
 
 function sqli() {
-    if [[ $SQLI != true ]] || [[ ! -s "gf/sqli.txt" ]] \
+    if [[ $SQLI != true ]] \
         || [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         if [[ $SQLI == false ]]; then
             skip_notification "disabled"
-        elif [[ ! -s "gf/sqli.txt" ]]; then
-            skip_notification "noinput"
         fi
+        return 0
+    fi
+
+    if [[ ! -s "gf/sqli.txt" ]] && ! _sqli_has_crawl_roots; then
+        skip_notification "noinput"
         return 0
     fi
 
