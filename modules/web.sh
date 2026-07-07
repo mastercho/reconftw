@@ -863,34 +863,35 @@ _filter_noisy_ip_port_urls() {
     local threshold="${PORTSCAN_NOISY_IP_PORT_THRESHOLD:-100}"
 
     awk -v threshold="$threshold" '
-    function parse_ip_port(url, out,    rest, slash, hp_n, hp) {
-        if (url !~ /^https?:\/\/([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+([\/?#]|$)/) return 0
+    function parse_ip_port(url,    rest, slash, hp_n, hp) {
+        parsed_ip = ""
+        parsed_port = ""
+        if (url !~ /^https?:\/\//) return 0
         rest = url
         sub(/^https?:\/\//, "", rest)
         slash = match(rest, /[\/?#]/)
         if (slash) rest = substr(rest, 1, slash - 1)
         hp_n = split(rest, hp, ":")
         if (hp_n != 2 || hp[2] !~ /^[0-9]+$/) return 0
-        out["ip"] = hp[1]
-        out["port"] = hp[2]
+        if (hp[1] !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) return 0
+        parsed_ip = hp[1]
+        parsed_port = hp[2]
         return 1
     }
     {
         lines[NR] = $0
-        delete parsed
-        if (parse_ip_port($0, parsed)) {
-            key = parsed["ip"] SUBSEP parsed["port"]
+        if (parse_ip_port($0)) {
+            key = parsed_ip SUBSEP parsed_port
             if (!(key in seen_port)) {
                 seen_port[key] = 1
-                port_count[parsed["ip"]]++
+                port_count[parsed_ip]++
             }
         }
     }
     END {
         for (i = 1; i <= NR; i++) {
-            delete parsed
-            if (parse_ip_port(lines[i], parsed) && port_count[parsed["ip"]] > threshold && parsed["port"] != "80" && parsed["port"] != "443") {
-                noisy[parsed["ip"]] = port_count[parsed["ip"]]
+            if (parse_ip_port(lines[i]) && port_count[parsed_ip] > threshold && parsed_port != "80" && parsed_port != "443") {
+                noisy[parsed_ip] = port_count[parsed_ip]
                 next
             }
             print lines[i]
@@ -1283,6 +1284,12 @@ _nuclei_prepare_waf_lists() {
         while read -r host; do
             awk -v h="$host" -F/ '{u=$3; sub(/:.*/,"",u); if (u==h) print $0}' .tmp/webs_subs.txt | anew -q "$WAF_LIST"
         done <.tmp/slow_hosts.txt
+    fi
+
+    # Safety net: if classification failed for any reason, do not leave nuclei with no targets.
+    if [[ ! -s "$WAF_LIST" && ! -s "$NOWAF_LIST" && -s .tmp/webs_subs.txt ]]; then
+        cp .tmp/webs_subs.txt "$NOWAF_LIST"
+        _print_msg WARN "nuclei target split produced empty lists; falling back to all targets as non-WAF"
     fi
 }
 
