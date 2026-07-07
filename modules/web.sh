@@ -860,44 +860,45 @@ function portscan() {
 _filter_noisy_ip_port_urls() {
     local threshold="${PORTSCAN_NOISY_IP_PORT_THRESHOLD:-100}"
 
-    awk -v threshold="$threshold" '
-    function parse_ip_port(url,    rest, slash, hp_n, hp) {
-        parsed_ip = ""
-        parsed_port = ""
-        if (url !~ /^https?:\/\//) return 0
-        rest = url
-        sub(/^https?:\/\//, "", rest)
-        slash = match(rest, /[\/?#]/)
-        if (slash) rest = substr(rest, 1, slash - 1)
-        hp_n = split(rest, hp, ":")
-        if (hp_n != 2 || hp[2] !~ /^[0-9]+$/) return 0
-        if (hp[1] !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) return 0
-        parsed_ip = hp[1]
-        parsed_port = hp[2]
-        return 1
-    }
-    {
-        lines[NR] = $0
-        if (parse_ip_port($0)) {
-            key = parsed_ip SUBSEP parsed_port
-            if (!(key in seen_port)) {
-                seen_port[key] = 1
-                port_count[parsed_ip]++
-            }
-        }
-    }
-    END {
-        for (i = 1; i <= NR; i++) {
-            if (parse_ip_port(lines[i]) && port_count[parsed_ip] > threshold && parsed_port != "80" && parsed_port != "443") {
-                noisy[parsed_ip] = port_count[parsed_ip]
-                next
-            }
-            print lines[i]
-        }
-        for (ip in noisy) {
-            printf "portscan noisy-ip filter: dropped %s urls for %s (> %s distinct ports)\n", noisy[ip], ip, threshold > "/dev/stderr"
-        }
-    }'
+    if ! command -v python3 >/dev/null 2>&1; then
+        cat
+        return 0
+    fi
+
+    python3 -c '
+import re
+import sys
+
+threshold = int(sys.argv[1])
+lines = sys.stdin.read().splitlines()
+rx = re.compile(r"^https?://((?:\d{1,3}\.){3}\d{1,3}):(\d+)(?:[/?#]|$)", re.I)
+
+ports = {}
+parsed = []
+for line in lines:
+    match = rx.match(line)
+    if not match:
+        parsed.append(None)
+        continue
+    ip, port = match.group(1), match.group(2)
+    parsed.append((ip, port))
+    ports.setdefault(ip, set()).add(port)
+
+noisy = {}
+for line, item in zip(lines, parsed):
+    if item:
+        ip, port = item
+        if len(ports.get(ip, ())) > threshold and port not in ("80", "443"):
+            noisy[ip] = len(ports[ip])
+            continue
+    print(line)
+
+for ip, count in sorted(noisy.items()):
+    print(
+        f"portscan noisy-ip filter: dropped urls for {ip} ({count} distinct ports > {threshold})",
+        file=sys.stderr,
+    )
+' "$threshold"
 }
 
 _clean_noisy_portscan_urls_file() {
@@ -1074,12 +1075,9 @@ _build_nuclei_target_list() {
         | sort -u >"$raw_targets"
 
     if [[ -s "$raw_targets" ]]; then
-        if _filter_noisy_ip_port_urls <"$raw_targets" 2>>"$LOGFILE" | sort -u >.tmp/webs_subs.txt \
-            && [[ -s .tmp/webs_subs.txt ]]; then
-            :
-        else
+        if ! _filter_noisy_ip_port_urls <"$raw_targets" 2>>"$LOGFILE" | sort -u >.tmp/webs_subs.txt; then
             cp "$raw_targets" .tmp/webs_subs.txt
-            _print_msg WARN "nuclei target noisy-port filter produced no output; using raw target list"
+            _print_msg WARN "nuclei target noisy-port filter failed; using raw target list"
         fi
     else
         : >.tmp/webs_subs.txt
