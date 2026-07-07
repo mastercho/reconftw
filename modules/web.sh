@@ -807,11 +807,9 @@ function portscan() {
         fi
 
         if [[ -s "hosts/portscan_active.xml" ]]; then
-            nmapurls <hosts/portscan_active.xml 2>>"$LOGFILE" | _filter_noisy_ip_port_urls 2>>"$LOGFILE" | anew -q hosts/webs.txt
+            nmapurls <hosts/portscan_active.xml 2>>"$LOGFILE" | anew -q hosts/webs.txt
             # Feed IPv4 nmap URL findings back into the main web target set.
-            _clean_noisy_portscan_urls
-            [[ -s hosts/webs.txt ]] && _filter_noisy_ip_port_urls <hosts/webs.txt 2>>"$LOGFILE" | anew -q webs/webs.txt
-            _clean_noisy_portscan_urls
+            [[ -s hosts/webs.txt ]] && cat hosts/webs.txt | anew -q webs/webs.txt
         fi
         if [[ -s "hosts/portscan_active_v6.xml" ]]; then
             nmapurls <hosts/portscan_active_v6.xml 2>>"$LOGFILE" | anew -q hosts/webs_v6.txt
@@ -915,9 +913,8 @@ _clean_noisy_portscan_urls_file() {
 }
 
 _clean_noisy_portscan_urls() {
-    _clean_noisy_portscan_urls_file "hosts/webs.txt"
-    _clean_noisy_portscan_urls_file "webs/webs.txt"
-    _clean_noisy_portscan_urls_file "webs/webs_all.txt"
+    # Do not rewrite canonical source files here. The noisy filter is applied
+    # only to temporary nuclei inputs so a filter issue cannot empty webs/hosts.
     _clean_noisy_portscan_urls_file ".tmp/webs_subs.txt"
 }
 
@@ -941,7 +938,7 @@ _append_ip_port_file_as_urls() {
             split(line, a, ":")
             emit_ip_port(a[1], a[2])
         }
-    }' "$infile" | _filter_noisy_ip_port_urls 2>>"$LOGFILE" | anew -q hosts/webs.txt
+    }' "$infile" | anew -q hosts/webs.txt
 }
 
 # Parse nmap normal output (smap/nmap -oN, including portscan_passive.txt) -> ip:port URLs.
@@ -977,7 +974,7 @@ _append_nmap_scan_text_as_urls() {
         if (cur_ip == "") next
         split($1, p, "/")
         emit_ip_port(cur_ip, p[1])
-    }' "$infile" | _filter_noisy_ip_port_urls 2>>"$LOGFILE" | anew -q hosts/webs.txt
+    }' "$infile" | anew -q hosts/webs.txt
 }
 
 # Open ports from nmap gnmap -> http(s) ip:port URLs (fallback when nmapurls XML path is empty).
@@ -1017,7 +1014,7 @@ _append_gnmap_open_ports_as_urls() {
                 emit_ip_port(cur_ip, f[1])
             }
         }
-    }' "$gnmap" | _filter_noisy_ip_port_urls 2>>"$LOGFILE" | anew -q hosts/webs.txt
+    }' "$gnmap" | anew -q hosts/webs.txt
 }
 
 # Merge passive/active port discovery into hosts/webs.txt for nuclei.
@@ -1029,10 +1026,8 @@ _feed_port_discovery_urls() {
     _append_ip_port_file_as_urls "hosts/naabu_open.txt"
     _append_gnmap_open_ports_as_urls "hosts/portscan_active.gnmap"
     _append_gnmap_open_ports_as_urls "hosts/portscan_active_targeted.gnmap"
-    _clean_noisy_portscan_urls
     if [[ -s hosts/webs.txt ]]; then
-        _filter_noisy_ip_port_urls <hosts/webs.txt 2>>"$LOGFILE" | anew -q webs/webs.txt
-        _clean_noisy_portscan_urls
+        cat hosts/webs.txt | anew -q webs/webs.txt
     fi
 }
 
@@ -1071,12 +1066,24 @@ _normalize_nuclei_targets() {
 _build_nuclei_target_list() {
     _feed_port_discovery_urls
     ensure_webs_all || true
+    local raw_targets=".tmp/webs_subs_raw.txt"
     _clean_noisy_portscan_urls
     cat webs/webs_all.txt .tmp/ips_nocdn.txt hosts/webs.txt 2>>"$LOGFILE" \
         | sed '/^$/d' \
         | _normalize_nuclei_targets \
-        | _filter_noisy_ip_port_urls 2>>"$LOGFILE" \
-        | sort -u >.tmp/webs_subs.txt
+        | sort -u >"$raw_targets"
+
+    if [[ -s "$raw_targets" ]]; then
+        if _filter_noisy_ip_port_urls <"$raw_targets" 2>>"$LOGFILE" | sort -u >.tmp/webs_subs.txt \
+            && [[ -s .tmp/webs_subs.txt ]]; then
+            :
+        else
+            cp "$raw_targets" .tmp/webs_subs.txt
+            _print_msg WARN "nuclei target noisy-port filter produced no output; using raw target list"
+        fi
+    else
+        : >.tmp/webs_subs.txt
+    fi
 }
 
 _build_service_fp_targets_from_nmap() {
