@@ -807,9 +807,11 @@ function portscan() {
         fi
 
         if [[ -s "hosts/portscan_active.xml" ]]; then
-            nmapurls <hosts/portscan_active.xml 2>>"$LOGFILE" | anew -q hosts/webs.txt
+            nmapurls <hosts/portscan_active.xml 2>>"$LOGFILE" | _filter_noisy_ip_port_urls 2>>"$LOGFILE" | anew -q hosts/webs.txt
             # Feed IPv4 nmap URL findings back into the main web target set.
-            [[ -s hosts/webs.txt ]] && cat hosts/webs.txt | anew -q webs/webs.txt
+            _clean_noisy_portscan_urls
+            [[ -s hosts/webs.txt ]] && _filter_noisy_ip_port_urls <hosts/webs.txt 2>>"$LOGFILE" | anew -q webs/webs.txt
+            _clean_noisy_portscan_urls
         fi
         if [[ -s "hosts/portscan_active_v6.xml" ]]; then
             nmapurls <hosts/portscan_active_v6.xml 2>>"$LOGFILE" | anew -q hosts/webs_v6.txt
@@ -857,6 +859,67 @@ function portscan() {
 
 # Turn ip:port lines (naabu, etc.) into http(s) URLs for nuclei and webs/hosts lists.
 # Usage: _append_ip_port_file_as_urls <file>
+_filter_noisy_ip_port_urls() {
+    local threshold="${PORTSCAN_NOISY_IP_PORT_THRESHOLD:-100}"
+
+    awk -v threshold="$threshold" '
+    function parse_ip_port(url, out,    rest, slash, hp_n, hp) {
+        if (url !~ /^https?:\/\/([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+([\/?#]|$)/) return 0
+        rest = url
+        sub(/^https?:\/\//, "", rest)
+        slash = match(rest, /[\/?#]/)
+        if (slash) rest = substr(rest, 1, slash - 1)
+        hp_n = split(rest, hp, ":")
+        if (hp_n != 2 || hp[2] !~ /^[0-9]+$/) return 0
+        out["ip"] = hp[1]
+        out["port"] = hp[2]
+        return 1
+    }
+    {
+        lines[NR] = $0
+        delete parsed
+        if (parse_ip_port($0, parsed)) {
+            key = parsed["ip"] SUBSEP parsed["port"]
+            if (!(key in seen_port)) {
+                seen_port[key] = 1
+                port_count[parsed["ip"]]++
+            }
+        }
+    }
+    END {
+        for (i = 1; i <= NR; i++) {
+            delete parsed
+            if (parse_ip_port(lines[i], parsed) && port_count[parsed["ip"]] > threshold) {
+                noisy[parsed["ip"]] = port_count[parsed["ip"]]
+                next
+            }
+            print lines[i]
+        }
+        for (ip in noisy) {
+            printf "portscan noisy-ip filter: dropped %s urls for %s (> %s distinct ports)\n", noisy[ip], ip, threshold > "/dev/stderr"
+        }
+    }'
+}
+
+_clean_noisy_portscan_urls_file() {
+    local file="$1"
+    [[ -s "$file" ]] || return 0
+
+    local tmp="${file}.noisy-filter.tmp"
+    if _filter_noisy_ip_port_urls <"$file" >"$tmp" 2>>"$LOGFILE"; then
+        mv "$tmp" "$file"
+    else
+        rm -f "$tmp"
+    fi
+}
+
+_clean_noisy_portscan_urls() {
+    _clean_noisy_portscan_urls_file "hosts/webs.txt"
+    _clean_noisy_portscan_urls_file "webs/webs.txt"
+    _clean_noisy_portscan_urls_file "webs/webs_all.txt"
+    _clean_noisy_portscan_urls_file ".tmp/webs_subs.txt"
+}
+
 _append_ip_port_file_as_urls() {
     local infile="$1"
     [[ ! -s "$infile" ]] && return 0
@@ -877,7 +940,7 @@ _append_ip_port_file_as_urls() {
             split(line, a, ":")
             emit_ip_port(a[1], a[2])
         }
-    }' "$infile" | anew -q hosts/webs.txt
+    }' "$infile" | _filter_noisy_ip_port_urls 2>>"$LOGFILE" | anew -q hosts/webs.txt
 }
 
 # Parse nmap normal output (smap/nmap -oN, including portscan_passive.txt) -> ip:port URLs.
@@ -913,7 +976,7 @@ _append_nmap_scan_text_as_urls() {
         if (cur_ip == "") next
         split($1, p, "/")
         emit_ip_port(cur_ip, p[1])
-    }' "$infile" | anew -q hosts/webs.txt
+    }' "$infile" | _filter_noisy_ip_port_urls 2>>"$LOGFILE" | anew -q hosts/webs.txt
 }
 
 # Open ports from nmap gnmap -> http(s) ip:port URLs (fallback when nmapurls XML path is empty).
@@ -953,7 +1016,7 @@ _append_gnmap_open_ports_as_urls() {
                 emit_ip_port(cur_ip, f[1])
             }
         }
-    }' "$gnmap" | anew -q hosts/webs.txt
+    }' "$gnmap" | _filter_noisy_ip_port_urls 2>>"$LOGFILE" | anew -q hosts/webs.txt
 }
 
 # Merge passive/active port discovery into hosts/webs.txt for nuclei.
@@ -965,8 +1028,10 @@ _feed_port_discovery_urls() {
     _append_ip_port_file_as_urls "hosts/naabu_open.txt"
     _append_gnmap_open_ports_as_urls "hosts/portscan_active.gnmap"
     _append_gnmap_open_ports_as_urls "hosts/portscan_active_targeted.gnmap"
+    _clean_noisy_portscan_urls
     if [[ -s hosts/webs.txt ]]; then
-        cat hosts/webs.txt | anew -q webs/webs.txt
+        _filter_noisy_ip_port_urls <hosts/webs.txt 2>>"$LOGFILE" | anew -q webs/webs.txt
+        _clean_noisy_portscan_urls
     fi
 }
 
@@ -1005,9 +1070,11 @@ _normalize_nuclei_targets() {
 _build_nuclei_target_list() {
     _feed_port_discovery_urls
     ensure_webs_all || true
+    _clean_noisy_portscan_urls
     cat webs/webs_all.txt .tmp/ips_nocdn.txt hosts/webs.txt 2>>"$LOGFILE" \
         | sed '/^$/d' \
         | _normalize_nuclei_targets \
+        | _filter_noisy_ip_port_urls 2>>"$LOGFILE" \
         | sort -u >.tmp/webs_subs.txt
 }
 

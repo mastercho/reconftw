@@ -624,7 +624,7 @@ function sqli_sqlmap() {
 
     start_func "$fn" "SQLMap SQLi Checks"
     if [[ "$crawl_fallback" == true ]]; then
-        local crawl_depth="${SQLMAP_CRAWL_DEPTH:-1}"
+        local crawl_depth="${SQLMAP_CRAWL_DEPTH:-2}"
         local crawl_roots_count
         crawl_roots_count=$(wc -l <".tmp/tmp_sqli_crawl_roots.txt" 2>/dev/null || echo 0)
         _print_msg INFO "Running: SQLMap crawl fallback (${crawl_roots_count} root(s), crawl depth ${crawl_depth})"
