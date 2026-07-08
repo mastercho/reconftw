@@ -623,14 +623,29 @@ function sqli_sqlmap() {
     fi
 
     start_func "$fn" "SQLMap SQLi Checks"
+    mkdir -p vulns/sqlmap
     if [[ "$crawl_fallback" == true ]]; then
         local crawl_depth="${SQLMAP_CRAWL_DEPTH:-2}"
-        local crawl_roots_count
+        local crawl_roots_count sqlmap_log sqlmap_cmd_file
         crawl_roots_count=$(wc -l <".tmp/tmp_sqli_crawl_roots.txt" 2>/dev/null || echo 0)
+        sqlmap_log="vulns/sqlmap/crawl_fallback.log"
+        sqlmap_cmd_file="vulns/sqlmap/crawl_fallback_command.txt"
+        cp ".tmp/tmp_sqli_crawl_roots.txt" "vulns/sqlmap/crawl_fallback_targets.txt" 2>/dev/null || true
+        {
+            printf 'Started: %s\n' "$(date +'%Y-%m-%d %H:%M:%S')"
+            printf 'Mode: crawl fallback\n'
+            printf 'Targets: %s\n' "$crawl_roots_count"
+            printf 'Crawl depth: %s\n' "$crawl_depth"
+            printf 'Command:\n'
+            printf 'python3 %q -m %q --crawl=%q --forms -b -o --smart --batch --disable-coloring --random-agent --level=3 --risk=2 --output-dir=%q\n' \
+                "${tools}/sqlmap/sqlmap.py" ".tmp/tmp_sqli_crawl_roots.txt" "$crawl_depth" "vulns/sqlmap"
+        } >"$sqlmap_cmd_file"
+        : >"$sqlmap_log"
         _print_msg INFO "Running: SQLMap crawl fallback (${crawl_roots_count} root(s), crawl depth ${crawl_depth})"
         run_command python3 "${tools}/sqlmap/sqlmap.py" -m ".tmp/tmp_sqli_crawl_roots.txt" --crawl="$crawl_depth" --forms -b -o --smart \
             --batch --disable-coloring --random-agent --level=3 --risk=2 \
-            --output-dir="vulns/sqlmap" 2>>"$LOGFILE" >/dev/null
+            --output-dir="vulns/sqlmap" >>"$sqlmap_log" 2>&1 || true
+        cat "$sqlmap_log" >>"$LOGFILE" 2>/dev/null || true
     else
         _print_msg INFO "Running: SQLMap for SQLi Checks"
         run_command python3 "${tools}/sqlmap/sqlmap.py" -m ".tmp/tmp_sqli.txt" -b -o --smart \
