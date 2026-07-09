@@ -907,7 +907,49 @@ function command_injection() {
     # Run Commix if enabled (COMM_INJ enables by default when COMMIX unset)
     if [[ ${COMMIX:-$COMM_INJ} == true ]]; then
         _print_msg INFO "Running: Commix for Command Injection Checks"
-        run_command commix --batch -m ".tmp/tmp_rce.txt" --output-dir "vulns/command_injection" 2>>"$LOGFILE" >/dev/null
+        mkdir -p "vulns/command_injection/logs"
+        : >"vulns/command_injection/targets.txt"
+        cp ".tmp/tmp_rce.txt" "vulns/command_injection/targets.txt" 2>/dev/null || true
+
+        local commix_timeout="${COMMIX_TIMEOUT:-60m}"
+        local commix_answers="${COMMIX_ANSWERS:-pseudo-terminal=N}"
+        local commix_target commix_idx=0 commix_total commix_hash commix_one commix_log
+        commix_total=$(wc -l <".tmp/tmp_rce.txt" 2>/dev/null || echo 0)
+
+        while IFS= read -r commix_target || [[ -n "$commix_target" ]]; do
+            [[ -z "$commix_target" ]] && continue
+            commix_idx=$((commix_idx + 1))
+            commix_hash=$(_hash_string "$commix_target")
+            commix_one=".tmp/commix_target_${commix_hash}.txt"
+            commix_log="vulns/command_injection/logs/${commix_idx}_${commix_hash}.log"
+            printf '%s\n' "$commix_target" >"$commix_one"
+            {
+                printf 'Started: %s\n' "$(date +'%Y-%m-%d %H:%M:%S')"
+                printf 'Target %s/%s: %s\n' "$commix_idx" "$commix_total" "$commix_target"
+                printf 'Timeout: %s\n\n' "$commix_timeout"
+                printf 'Answers: %s\n\n' "$commix_answers"
+            } >"$commix_log"
+
+            _print_msg INFO "Commix target ${commix_idx}/${commix_total}"
+            local -a commix_cmd=(commix --batch -m "$commix_one" --output-dir "vulns/command_injection")
+            [[ -n "$commix_answers" ]] && commix_cmd+=(--answers="$commix_answers")
+            if [[ -n "${TIMEOUT_CMD:-}" && "$commix_timeout" != "0" && "$commix_timeout" != "false" ]]; then
+                run_command "$TIMEOUT_CMD" -k 30s "$commix_timeout" "${commix_cmd[@]}" \
+                    >>"$commix_log" 2>&1 || {
+                    local commix_rc=$?
+                    if [[ "$commix_rc" -eq 124 || "$commix_rc" -eq 137 ]]; then
+                        printf '\nTimed out after %s\n' "$commix_timeout" >>"$commix_log"
+                        printf '%s\n' "$commix_target" | anew -q "vulns/command_injection/timed_out.txt"
+                    else
+                        printf '\nCommix exited with code %s\n' "$commix_rc" >>"$commix_log"
+                    fi
+                }
+            else
+                run_command "${commix_cmd[@]}" >>"$commix_log" 2>&1 || true
+            fi
+            cat "$commix_log" >>"$LOGFILE" 2>/dev/null || true
+            rm -f "$commix_one" 2>/dev/null || true
+        done <".tmp/tmp_rce.txt"
     fi
 
                 # Additional tools can be integrated here (e.g., Ghauri, sqlmap)
