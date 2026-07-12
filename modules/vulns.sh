@@ -935,7 +935,7 @@ function command_injection() {
             [[ -n "$commix_answers" ]] && commix_cmd+=(--answers="$commix_answers")
             if [[ -n "${TIMEOUT_CMD:-}" && "$commix_timeout" != "0" && "$commix_timeout" != "false" ]]; then
                 run_command "$TIMEOUT_CMD" -k 30s "$commix_timeout" "${commix_cmd[@]}" \
-                    >>"$commix_log" 2>&1 || {
+                    </dev/null >>"$commix_log" 2>&1 || {
                     local commix_rc=$?
                     if [[ "$commix_rc" -eq 124 || "$commix_rc" -eq 137 ]]; then
                         printf '\nTimed out after %s\n' "$commix_timeout" >>"$commix_log"
@@ -945,7 +945,7 @@ function command_injection() {
                     fi
                 }
             else
-                run_command "${commix_cmd[@]}" >>"$commix_log" 2>&1 || true
+                run_command "${commix_cmd[@]}" </dev/null >>"$commix_log" 2>&1 || true
             fi
             cat "$commix_log" >>"$LOGFILE" 2>/dev/null || true
             rm -f "$commix_one" 2>/dev/null || true
@@ -1375,7 +1375,7 @@ _wp_brute_collect_targets() {
     for json_file in nuclei_output/*_json.txt nuclei_output/dast_json.txt; do
         [[ -f "$json_file" && -s "$json_file" ]] || continue
         jq -r '
-            select((."template-id" // "" | test("(?i)(wp-user|wp-login|xmlrpc)"))) |
+            select((."template-id" // "" | test("(?i)(wp-user|wordpress.*user|wp-login|xmlrpc)"))) |
             (.["matched-at"] // .host // empty)
         ' "$json_file" 2>/dev/null | while IFS= read -r line; do
             _wp_brute_base_url "$line" | anew -q ".tmp/wp_brute_targets.txt"
@@ -1385,7 +1385,7 @@ _wp_brute_collect_targets() {
     sort -u ".tmp/wp_brute_targets.txt" -o ".tmp/wp_brute_targets.txt" 2>/dev/null || true
 }
 
-# Map nuclei wp-user-enum extracted usernames per base URL (built once per wp_brute_pro run).
+# Map nuclei WordPress user-enum extracted usernames per base URL (built once per wp_brute_pro run).
 _wp_brute_collect_nuclei_users() {
     : >".tmp/wp_brute_nuclei_users.tsv"
 
@@ -1397,7 +1397,7 @@ _wp_brute_collect_nuclei_users() {
     for json_file in nuclei_output/*_json.txt nuclei_output/dast_json.txt; do
         [[ -s "$json_file" ]] || continue
         jq -r '
-            select((."template-id" // "" | test("(?i)wp-user"))) |
+            select((."template-id" // "" | test("(?i)(wp-user|wordpress.*user)"))) |
             (.["matched-at"] // .host // empty) as $m |
             (.["extracted-results"] // [])[]? |
             select(. != null and (. | tostring | length) > 0) |
@@ -1408,6 +1408,82 @@ _wp_brute_collect_nuclei_users() {
             printf '%s\t%s\n' "$base" "$user"
         done >>".tmp/wp_brute_nuclei_users.tsv"
     done
+
+    # Some nuclei templates (for example wordpress-rdf-user-enum) may only be
+    # present in the text output. Convert display names into common login forms.
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY' >>".tmp/wp_brute_nuclei_users.tsv" 2>/dev/null
+import ast
+import glob
+import re
+import unicodedata
+from urllib.parse import urlsplit
+
+
+def base_url(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    if not re.match(r"^https?://", raw, re.I):
+        raw = "https://" + raw
+    parts = urlsplit(raw)
+    if not parts.scheme or not parts.netloc:
+        return ""
+    host = parts.netloc
+    if parts.scheme == "https" and host.endswith(":443"):
+        host = host[:-4]
+    if parts.scheme == "http" and host.endswith(":80"):
+        host = host[:-3]
+    return f"{parts.scheme}://{host}"
+
+
+def ascii_word(value):
+    value = unicodedata.normalize("NFKD", value)
+    value = value.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^A-Za-z0-9._-]+", "", value)
+
+
+def candidates(name):
+    cleaned = re.sub(r"\s+", " ", (name or "").strip())
+    if not cleaned:
+        return []
+    parts = [ascii_word(p).lower() for p in cleaned.replace("-", " ").split()]
+    parts = [p for p in parts if p]
+    joined = ascii_word(cleaned).lower()
+    dashed = ascii_word(cleaned.replace(" ", "-")).lower()
+    dotted = ".".join(parts)
+    underscored = "_".join(parts)
+    out = [joined, dashed, dotted, underscored, *parts]
+    seen = set()
+    return [u for u in out if u and not (u in seen or seen.add(u))]
+
+
+line_re = re.compile(r"^\[(?P<tid>[^\]]+)\]\s+\[[^\]]+\]\s+\[[^\]]+\]\s+(?P<url>\S+)\s+(?P<values>\[.*\])\s*$")
+for path in glob.glob("nuclei_output/*.txt") + glob.glob("nuclei_output/dast.txt"):
+    if path.endswith("_json.txt"):
+        continue
+    try:
+        fh = open(path, "r", encoding="utf-8", errors="ignore")
+    except OSError:
+        continue
+    with fh:
+        for line in fh:
+            m = line_re.match(line.strip())
+            if not m or not re.search(r"(wp-user|wordpress.*user)", m.group("tid"), re.I):
+                continue
+            base = base_url(m.group("url"))
+            if not base:
+                continue
+            try:
+                values = ast.literal_eval(m.group("values"))
+            except Exception:
+                values = []
+            for value in values:
+                for user in candidates(str(value)):
+                    print(f"{base}\t{user}")
+PY
+    fi
+
     sort -u ".tmp/wp_brute_nuclei_users.tsv" -o ".tmp/wp_brute_nuclei_users.tsv" 2>/dev/null || true
 }
 
@@ -1690,7 +1766,7 @@ _wp_brute_process_one_target() {
             fi
         fi
         if [[ -z "$users_csv" ]]; then
-            log_note "wp_brute_pro: no users (Scanner + nuclei wp-user-enum) for ${target_url}" "wp_brute_pro" "${LINENO}"
+            log_note "wp_brute_pro: no users (Scanner + nuclei WordPress user-enum) for ${target_url}" "wp_brute_pro" "${LINENO}"
             return 0
         fi
 
