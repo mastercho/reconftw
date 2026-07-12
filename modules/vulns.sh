@@ -505,7 +505,18 @@ _sqli_prepare_crawl_roots() {
     cat webs/webs_all.txt webs/webs.txt webs/webs_uncommon_ports.txt 2>/dev/null \
         | grep -aE '^https?://' \
         | sed 's/[[:space:]]*$//' \
-        | sort -u >"$roots_file" || true
+        | awk '
+            NF {
+                u=$0
+                lu=tolower(u)
+                rank=3
+                if (lu ~ /^https:\/\/[^\/:]+(:443)?([\/?#]|$)/) rank=1
+                else if (lu ~ /^http:\/\/[^\/:]+(:80)?([\/?#]|$)/) rank=2
+                print rank "\t" u
+            }
+        ' \
+        | sort -k1,1n -k2,2 \
+        | awk -F'\t' '!seen[$2]++ { print $2 }' >"$roots_file" || true
 
     [[ -s "$roots_file" ]] || return 1
 
