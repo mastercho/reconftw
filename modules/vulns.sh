@@ -136,18 +136,50 @@ function ssrf_checks() {
 
         # Handle COLLAB_SERVER configuration
         if [[ -z $COLLAB_SERVER ]]; then
-            interactsh-client &>.tmp/ssrf_callback.txt &
+            # -json emits each OOB interaction as a JSONL record (full-id/unique-id/
+            # protocol/raw-request/...) instead of only a human-readable line. We need
+            # the "full-id" field later to correlate a received callback back to the
+            # exact ffuf request that triggered it (see the confirmation block below).
+            # The [INF] startup banner (used to detect the assigned domain) remains
+            # plain text regardless of this flag.
+            interactsh-client -json &>.tmp/ssrf_callback.txt &
             INTERACTSH_PID=$!
             # Ensure interactsh is killed on function exit (prevents orphan processes)
             trap 'kill "$INTERACTSH_PID" 2>/dev/null; trap - RETURN' RETURN
-            sleep 2
-
-            # Extract FFUFHASH from interactsh_callback.txt
-            COLLAB_SERVER_FIX="FFUFHASH.$(tail -n1 .tmp/ssrf_callback.txt | cut -c 16-)"
-            COLLAB_SERVER_URL="http://$COLLAB_SERVER_FIX"
+            # Poll up to 15s for interactsh to print its callback domain (avoids the old
+            # fixed 'sleep 2' race where the process hadn't initialised yet, causing
+            # COLLAB_SERVER_FIX to become "FFUFHASH." with an empty suffix).
+            local _isc_domain="" _isc_waited=0
+            while [[ -z "$_isc_domain" && $_isc_waited -lt 15 ]]; do
+                sleep 1
+                (( _isc_waited++ ))
+                # interactsh-client prints the assigned domain on its own [INF] line at
+                # startup, e.g.:
+                #   [INF] Listing 1 payload for OOB Testing
+                #   [INF] c23b2la0kl1krjcrdj10cndmnioyyyyyn.oast.pro
+                _isc_domain=$(grep -aoE '^\[INF\][[:space:]]+[a-z0-9]{10,}\.[a-z0-9.]+$' .tmp/ssrf_callback.txt 2>/dev/null \
+                    | awk '{print $2}' | tail -1)
+                # Fallback: grab any interactsh-style domain directly, in case the
+                # banner format changes between client versions.
+                if [[ -z "$_isc_domain" ]]; then
+                    _isc_domain=$(grep -aoE '[a-z0-9]{10,}\.(oast\.[a-z]+|interact\.sh)' \
+                        .tmp/ssrf_callback.txt 2>/dev/null | tail -1)
+                fi
+            done
+            if [[ -n "$_isc_domain" ]]; then
+                COLLAB_SERVER_FIX="FFUFHASH.${_isc_domain}"
+            else
+                _print_msg WARN "interactsh did not return a callback URL within 15s; SSRF OOB detection may be unreliable"
+                COLLAB_SERVER_FIX="FFUFHASH.$(tail -n1 .tmp/ssrf_callback.txt | cut -c 16-)"
+            fi
+            COLLAB_SERVER_URL="http://${COLLAB_SERVER_FIX}"
             INTERACT=true
         else
+            # Strip scheme for the raw-token form; keep original URL for HTTP-scheme form.
+            # Note: COLLAB_SERVER_URL was previously undefined in this branch, causing
+            # qsreplace and ffuf header-injection calls below to use an empty value.
             COLLAB_SERVER_FIX="FFUFHASH.$(echo "$COLLAB_SERVER" | sed -r "s|https?://||")"
+            COLLAB_SERVER_URL="${COLLAB_SERVER}"
             INTERACT=false
         fi
 
@@ -192,8 +224,64 @@ function ssrf_checks() {
                 fi
             fi
 
-            # Allow time for callbacks to be received.
-            sleep 5
+            # Framework-specific SSRF endpoint probing (Next.js Image Optimization,
+            # Vercel OG image API, Nuxt IPX, Astro image endpoint). These are common,
+            # *guessable* SSRF sinks that gf's URL-pattern matching can miss entirely
+            # when the endpoint is never linked from a crawled page (e.g. /_next/image
+            # is invoked client-side by <Image> components, not hyperlinked, so it may
+            # never show up in webs/url_extract.txt -> gf/ssrf.txt at all). We probe
+            # them directly against every known live host instead of relying on prior
+            # discovery. Both raw and percent-encoded payload forms are tried since
+            # frameworks differ in whether they expect the target URL encoded.
+            if [[ -s "webs/webs_all.txt" ]]; then
+                local _fw_hosts_file="webs/webs_all.txt"
+                local _fw_host_count
+                _fw_host_count=$(wc -l <"$_fw_hosts_file")
+                # Cap default-mode blast radius; --deep removes the cap.
+                if [[ $DEEP != true ]] && [[ $_fw_host_count -gt 200 ]]; then
+                    head -n 200 "$_fw_hosts_file" >".tmp/ssrf_framework_hosts.txt"
+                    _fw_hosts_file=".tmp/ssrf_framework_hosts.txt"
+                fi
+
+                local -a _ssrf_framework_paths=(
+                    "/_next/image?url={PAYLOAD}&w=256&q=75"
+                    "/_vercel/image?url={PAYLOAD}&w=256&q=75"
+                    "/api/og?url={PAYLOAD}"
+                    "/_ipx/w_256/{PAYLOAD}"
+                    "/_image?href={PAYLOAD}"
+                )
+                local _fw_encoded_collab
+                _fw_encoded_collab=$(printf '%s' "${COLLAB_SERVER_URL}" | sed 's/:/%3A/g; s#/#%2F#g')
+
+                : >".tmp/tmp_ssrf_framework.txt"
+                while IFS= read -r _fw_base_url || [[ -n "$_fw_base_url" ]]; do
+                    [[ -z "$_fw_base_url" ]] && continue
+                    _fw_base_url="${_fw_base_url%/}"
+                    for _fw_path in "${_ssrf_framework_paths[@]}"; do
+                        printf '%s%s\n' "${_fw_base_url}" "${_fw_path//\{PAYLOAD\}/$COLLAB_SERVER_URL}" >>".tmp/tmp_ssrf_framework.txt"
+                        printf '%s%s\n' "${_fw_base_url}" "${_fw_path//\{PAYLOAD\}/$_fw_encoded_collab}" >>".tmp/tmp_ssrf_framework.txt"
+                    done
+                done <"$_fw_hosts_file"
+
+                if [[ -s ".tmp/tmp_ssrf_framework.txt" ]]; then
+                    _print_msg INFO "Running: FFUF for framework-specific SSRF endpoints (Next.js/Vercel/Nuxt/Astro)"
+                    run_command ffuf -v -H "${HEADER}" -t "$FFUF_THREADS" -rate "$FFUF_RATELIMIT" -w ".tmp/tmp_ssrf_framework.txt" -u "FUZZ" 2>/dev/null \
+                        | anew -q "vulns/ssrf_framework_endpoints.txt"
+                fi
+            fi
+
+            # Nuclei SSRF/OAST template pass — covers IMDSv2, blind-SSRF via OAST,
+            # and cloud-metadata templates that ffuf+qsreplace miss.
+            if command -v nuclei &>/dev/null && [[ -d "${NUCLEI_TEMPLATES_PATH:-}" ]]; then
+                _print_msg INFO "Running: Nuclei SSRF/OAST template scan"
+                run_command nuclei -l "gf/ssrf.txt" -tags ssrf,oast -nh \
+                    -rl "$NUCLEI_RATELIMIT" -silent -retries 2 ${NUCLEI_EXTRA_ARGS} \
+                    -j -o "vulns/ssrf_nuclei_json.txt" 2>>"$LOGFILE" >/dev/null || true
+            fi
+
+            # Allow time for OOB/DNS callbacks to be received.
+            # Hard-coded to 10s (was 5s) to reduce false negatives on slower DNS resolvers.
+            sleep 10
 
             # Process SSRF callback results if INTERACT is enabled.
             if [[ $INTERACT == true ]] && [[ -s ".tmp/ssrf_callback.txt" ]]; then
@@ -202,9 +290,56 @@ function ssrf_checks() {
                     NUMOFLINES=0
                 fi
                 notification "SSRF: ${NUMOFLINES} callbacks received" info
+
+                # Correlate each OOB hit back to the exact request that triggered it,
+                # using ffuf's built-in FFUFHASH history mapping (`ffuf -search <hash>`,
+                # see https://github.com/ffuf/ffuf/wiki/Ffufhash-mapping). This is the
+                # actual CONFIRMATION step that was previously missing: vulns/ssrf_
+                # requested*.txt only ever recorded "we fired a payload at this URL",
+                # never proof it was vulnerable. A real OOB interaction here proves it.
+                #
+                # Mechanism: COLLAB_SERVER_FIX/_URL embed the literal string FFUFHASH,
+                # which ffuf replaces with a unique per-request hash before sending
+                # (in the URL, and in headers/body -- confirmed supported). When
+                # interactsh (in -json mode) receives that hit, its "full-id" field
+                # is "<ffuf-hash>.<our-assigned-domain>" -- so the first dot-separated
+                # label of full-id IS the ffuf hash we can feed back into
+                # `ffuf -search` to reconstruct the original request (URL/host/header).
+                if [[ "$NUMOFLINES" -gt 0 ]] && command -v ffuf &>/dev/null && command -v jq &>/dev/null; then
+                    _print_msg INFO "Running: Correlating OOB callbacks to source requests (ffuf -search)"
+                    : >"vulns/ssrf_confirmed.txt"
+                    jq -R -r 'fromjson? | ."full-id"? // empty' ".tmp/ssrf_callback.txt" 2>/dev/null \
+                        | sed '/^$/d' | cut -d'.' -f1 | sort -u >".tmp/ssrf_hit_hashes.txt"
+
+                    if [[ -s ".tmp/ssrf_hit_hashes.txt" ]]; then
+                        while IFS= read -r _ssrf_hash; do
+                            [[ -z "$_ssrf_hash" ]] && continue
+                            _ssrf_req=$(ffuf -search "$_ssrf_hash" 2>/dev/null)
+                            [[ -z "$_ssrf_req" ]] && continue
+                            _ssrf_host=$(grep -aim1 '^Host:' <<<"$_ssrf_req" | sed 's/^[Hh]ost:[[:space:]]*//' | tr -d '\r')
+                            _ssrf_path=$(grep -aoE '^(GET|POST|PUT|HEAD) [^ ]+' <<<"$_ssrf_req" | head -1 | awk '{print $2}')
+                            [[ -z "$_ssrf_host" || -z "$_ssrf_path" ]] && continue
+                            # If the hash also appears in an injected header line (rather
+                            # than the URL itself), name that header for extra context.
+                            _ssrf_hdr=$(grep -ai "$_ssrf_hash" <<<"$_ssrf_req" | grep -aivE '^(GET|POST|PUT|HEAD) ' | head -1)
+                            # Scheme is not present in ffuf -search's reconstructed request
+                            # line (only Host + path); https is the reasonable default for
+                            # modern web targets.
+                            if [[ -n "$_ssrf_hdr" ]]; then
+                                printf 'https://%s%s  [CONFIRMED via OOB - header: %s]\n' "$_ssrf_host" "$_ssrf_path" "$_ssrf_hdr"
+                            else
+                                printf 'https://%s%s  [CONFIRMED via OOB callback]\n' "$_ssrf_host" "$_ssrf_path"
+                            fi
+                        done <".tmp/ssrf_hit_hashes.txt" | anew -q "vulns/ssrf_confirmed.txt"
+                    fi
+
+                    if [[ -s "vulns/ssrf_confirmed.txt" ]]; then
+                        notification "SSRF: $(wc -l <"vulns/ssrf_confirmed.txt") CONFIRMED finding(s) - see vulns/ssrf_confirmed.txt" warn
+                    fi
+                fi
             fi
 
-            end_func "Results are saved in vulns/ssrf_* (including alternate protocols)" "${FUNCNAME[0]}"
+            end_func "Results are saved in vulns/ssrf_* -- vulns/ssrf_confirmed.txt holds OOB-verified findings, the rest are unconfirmed candidates" "${FUNCNAME[0]}"
         else
             end_func "Skipping SSRF: Too many URLs to test, try with --deep flag." "${FUNCNAME[0]}"
         fi
@@ -303,7 +438,42 @@ function lfi() {
                 run_command interlace -tL ".tmp/tmp_lfi.txt" -threads "$INTERLACE_THREADS" -c "ffuf -v -r -t ${FFUF_THREADS} -rate ${FFUF_RATELIMIT} -H \"${HEADER}\" -w \"${lfi_wordlist}\" -u \"_target_\" -mr \"root:\" " 2>>"$LOGFILE" \
                     | grep -aF "| URL |" | sed 's/.*| URL | //' | anew -q "vulns/lfi.txt"
 
-                end_func "Results are saved in vulns/lfi.txt" "${FUNCNAME[0]}"
+                # Additional LFI engine: exhumed. Runs alongside the ffuf pass above
+                # (not a replacement, not optional) -- it walks a curated high-value
+                # file-path database with parser-aware content confirmation (ssh-key,
+                # proc-environ, config, unix-passwd, ...) instead of ffuf's single
+                # "root:" body-regex match, and additionally covers POST body, JSON
+                # body, header and cookie injection points via its own request-shape
+                # detection against each candidate URL.
+                local exhumed_bin="${tools}/exhumed/exhumed"
+                if [[ -x "$exhumed_bin" ]]; then
+                    _print_msg INFO "Running: LFI Fuzzing with exhumed (additional engine)"
+
+                    if ensure_dirs .tmp/exhumed_out; then
+                        : >"vulns/lfi_exhumed.txt"
+
+                        run_command interlace -tL ".tmp/tmp_lfi.txt" -threads "$INTERLACE_THREADS" \
+                            -c "{ printf 'TARGET:%s\n' \"_target_\"; \"${exhumed_bin}\" scan --url \"_target_\" --marker FUZZ --concurrency 10 --rate 20 --timeout 10s --traversal-depth 10 --only-hits; } > .tmp/exhumed_out/_cleantarget_.txt 2>>\"${LOGFILE}\"" \
+                            2>>"$LOGFILE" >/dev/null
+
+                        for _exhumed_out_file in .tmp/exhumed_out/*.txt; do
+                            [[ -s "$_exhumed_out_file" ]] || continue
+                            _exhumed_target=$(grep -m1 '^TARGET:' "$_exhumed_out_file" 2>/dev/null | sed 's/^TARGET://')
+                            grep '^\[CONFIRMED\]' "$_exhumed_out_file" 2>/dev/null | while IFS= read -r _exhumed_hit; do
+                                printf '%s :: %s\n' "${_exhumed_target:-unknown}" "$_exhumed_hit"
+                            done
+                        done | anew -q "vulns/lfi_exhumed.txt"
+
+                        if [[ -s "vulns/lfi_exhumed.txt" ]]; then
+                            cat "vulns/lfi_exhumed.txt" 2>/dev/null | anew -q "vulns/lfi.txt" || true
+                        fi
+                        rm -rf .tmp/exhumed_out 2>/dev/null || true
+                    fi
+                else
+                    _print_msg WARN "exhumed binary not found at ${exhumed_bin} (install.sh builds it from bugsyhewitt/exhumed); skipping additional LFI engine"
+                fi
+
+                end_func "Results are saved in vulns/lfi.txt (additional confirmed hits in vulns/lfi_exhumed.txt)" "${FUNCNAME[0]}"
             else
                 end_func "Skipping LFI: Too many URLs to test, try with --deep flag." "${FUNCNAME[0]}"
             fi

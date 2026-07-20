@@ -126,4 +126,5 @@ metagoofil=v1.4.0
 EmailHarvester=1.3.2
 reconftw_ai=HEAD
 gato=1.7
+exhumed=HEAD
 SSTImap=v1.3

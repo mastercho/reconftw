@@ -400,6 +400,7 @@ declare -A repos=(
     ["EmailHarvester"]="maldevel/EmailHarvester"
     ["reconftw_ai"]="six2dez/reconftw_ai"
     ["gato"]="praetorian-inc/gato"
+    ["exhumed"]="bugsyhewitt/exhumed"
     ["SSTImap"]="vladko312/SSTImap"
 )
 
@@ -627,6 +628,15 @@ function install_tools() {
                     msg_warn "[$repos_step/$total_repo] $repo: go build failed"
                 else
                     chmod +x ./ffufPostprocessing
+                fi
+                ;;
+            "exhumed")
+                # Requires Go 1.26+ (single static binary, no cgo); install_golang_version
+                # tracks the latest upstream Go release so this should already be satisfied.
+                if ! CGO_ENABLED=0 go build -o exhumed ./cmd/exhumed &>/dev/null; then
+                    msg_warn "[$repos_step/$total_repo] $repo: go build failed"
+                else
+                    chmod +x ./exhumed
                 fi
                 ;;
             "trufflehog")

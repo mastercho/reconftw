@@ -35,3 +35,14 @@ X-Real-Ip
 X-Remote-Addr
 X-Rewrite-Url
 X-Wap-Profile
+Destination
+X-Backend-Url
+X-Cluster-Client-IP
+X-Custom-IP-Authorization
+X-Forwarded-Proto
+X-Forwarded-Scheme
+X-Original-Host
+X-Remote-IP
+X-Real-URL
+X-Request-ID
+X-Target-URL
