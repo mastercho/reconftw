@@ -1090,6 +1090,7 @@ function command_injection() {
         _print_msg INFO "Running: Commix for Command Injection Checks"
         mkdir -p "vulns/command_injection/logs"
         : >"vulns/command_injection/targets.txt"
+        : >"vulns/command_injection/confirmed.txt"
         cp ".tmp/tmp_rce.txt" "vulns/command_injection/targets.txt" 2>/dev/null || true
 
         local commix_timeout="${COMMIX_TIMEOUT:-60m}"
@@ -1128,6 +1129,22 @@ function command_injection() {
             else
                 run_command "${commix_cmd[@]}" </dev/null >>"$commix_log" 2>&1 || true
             fi
+
+            # Extract genuine confirmations from the raw log. Commix prints an
+            # unambiguous line only when it actually confirms injectability:
+            #   "The <method> parameter '<name>' seems injectable via
+            #    (<technique>) ... command injection technique."
+            # Everything else in the log (negotiation prompts, "not injectable",
+            # progress noise) is not a finding. Without this, the raw per-target
+            # logs are indistinguishable noise vs. real hits at a glance.
+            if grep -aq "seems injectable via" "$commix_log" 2>/dev/null; then
+                {
+                    printf '%s\n' "$commix_target"
+                    grep -a "seems injectable via" "$commix_log" | sed 's/^/    /'
+                    printf '    log: %s\n' "$commix_log"
+                } >>"vulns/command_injection/confirmed.txt"
+            fi
+
             cat "$commix_log" >>"$LOGFILE" 2>/dev/null || true
             rm -f "$commix_one" 2>/dev/null || true
         done <".tmp/tmp_rce.txt"
@@ -1135,7 +1152,7 @@ function command_injection() {
 
                 # Additional tools can be integrated here (e.g., Ghauri, sqlmap)
 
-                end_func "Results are saved in vulns/command_injection folder" "${FUNCNAME[0]}"
+                end_func "Results are saved in vulns/command_injection folder -- vulns/command_injection/confirmed.txt holds actual confirmed hits, logs/*.log are raw per-target output" "${FUNCNAME[0]}"
             else
                 end_func "Skipping Command Injection: Too many URLs to test, try with --deep flag." "${FUNCNAME[0]}"
             fi
