@@ -594,6 +594,24 @@ skip_notification() {
         fi
         if [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]]; then
             if [[ "$badge" == "CACHE" ]]; then
+                # TEMP DIAGNOSTIC: capture hard evidence of the exact state that caused
+                # this cache-hit, to track down reports of markers being detected as
+                # present when `ls`/`stat` afterward shows them absent. Safe to remove
+                # once root-caused. Writes to <target_dir>/.tmp/called_fn_debug.log
+                # (best-effort; never fails the scan).
+                if [[ -n "${called_fn_dir:-}" ]]; then
+                    {
+                        printf '[%s] PID=%s FUNC=%s TEST_PATH=%s\n' \
+                            "$(date +'%Y-%m-%d %H:%M:%S.%N' 2>/dev/null || date +'%Y-%m-%d %H:%M:%S')" \
+                            "$$" "$func_name" "${called_fn_dir}/.${func_name}"
+                        printf '  called_fn_dir(raw)=%q\n' "${called_fn_dir}"
+                        printf '  test [-f]: '
+                        if [[ -f "${called_fn_dir}/.${func_name}" ]]; then printf 'TRUE\n'; else printf 'FALSE\n'; fi
+                        printf '  ls -la %q:\n' "${called_fn_dir}"
+                        ls -la "${called_fn_dir}" 2>&1 | sed 's/^/    /'
+                        printf '  --\n'
+                    } >>"${called_fn_dir}/../.tmp/called_fn_debug.log" 2>/dev/null || true
+                fi
                 _print_msg INFO "${func_name} already processed. To force re-run, delete: ${called_fn_dir:-.}/.${func_name}"
             else
                 _print_msg INFO "${func_name} skipped: ${reason}"
