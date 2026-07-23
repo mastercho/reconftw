@@ -128,31 +128,6 @@ function ssrf_checks() {
     # Create necessary directories
     if ! ensure_dirs .tmp gf vulns; then return 1; fi
 
-    # TEMP DIAGNOSTIC: unconditionally record every sub-condition of the guard
-    # below, every time this function is entered, regardless of outcome. Safe to
-    # remove once root-caused. Never fails the scan (best-effort, silenced).
-    if [[ -n "${called_fn_dir:-}" ]] || [[ -n "${dir:-}" ]]; then
-        {
-            printf '[%s] PID=%s ssrf_checks() ENTRY\n' \
-                "$(date +'%Y-%m-%d %H:%M:%S.%N' 2>/dev/null || date +'%Y-%m-%d %H:%M:%S')" "$$"
-            printf '  called_fn_dir=%q\n' "${called_fn_dir:-<unset>}"
-            printf '  domain=%q\n' "${domain:-<unset>}"
-            printf '  DIFF=%q\n' "${DIFF:-<unset>}"
-            printf '  SSRF_CHECKS=%q\n' "${SSRF_CHECKS:-<unset>}"
-            printf '  test [! -f "%s/.ssrf_checks"] = ' "${called_fn_dir:-<unset>}"
-            if [[ ! -f "${called_fn_dir:-/nonexistent}/.ssrf_checks" ]]; then printf 'TRUE\n'; else printf 'FALSE\n'; fi
-            printf '  test [DIFF == true] = '
-            if [[ "${DIFF:-}" == true ]]; then printf 'TRUE\n'; else printf 'FALSE\n'; fi
-            printf '  test [SSRF_CHECKS == true] = '
-            if [[ "${SSRF_CHECKS:-}" == true ]]; then printf 'TRUE\n'; else printf 'FALSE\n'; fi
-            printf '  test [-s "gf/ssrf.txt"] (cwd=%s) = ' "$(pwd 2>/dev/null)"
-            if [[ -s "gf/ssrf.txt" ]]; then printf 'TRUE (size=%s)\n' "$(wc -c <gf/ssrf.txt 2>/dev/null)"; else printf 'FALSE\n'; fi
-            printf '  test [domain matches bare-IP regex] = '
-            if [[ "${domain:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then printf 'TRUE (would block!)\n'; else printf 'FALSE\n'; fi
-            printf '  --\n'
-        } >>"${dir:-.}/.tmp/ssrf_guard_debug.log" 2>/dev/null || true
-    fi
-
     # Check if the function should run
     if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $SSRF_CHECKS == true ]] \
         && [[ -s "gf/ssrf.txt" ]] && ! [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

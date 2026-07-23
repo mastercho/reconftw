@@ -106,6 +106,68 @@ function validate_boolean() {
 	return 1
 }
 
+# normalize_bool_configs()
+# Description: Canonicalizes known reconftw.cfg boolean feature-flag variables
+#   to lowercase "true"/"false". Every module gates functionality via
+#   case-sensitive string comparisons like `[[ $SSRF_CHECKS == true ]]`, so a
+#   value set as TRUE/True/False/FALSE (easy to do via Docker/systemd env vars,
+#   secrets.cfg, or a custom_config.cfg -- shell casing conventions vary) would
+#   silently fail every comparison and disable the feature with no error,
+#   while status/skip messages still print a generic, misleading reason.
+#   Call this once, immediately after sourcing reconftw.cfg + secrets.cfg +
+#   any custom config, and before anything else reads these variables.
+# Arguments: none (operates on the fixed list of known boolean config vars below)
+# Returns: always 0
+function normalize_bool_configs() {
+	local -a bool_vars=(
+		ADAPTIVE_RATE_LIMIT AI_ALLOW_MODEL_PULL AI_STRICT ALERT_SUPPRESSION
+		API_LEAKS API_LEAKS_POSTLEAKS ASN_ENUM AXIOM_AUTO_FIX_HOSTKEY
+		AXIOM_FLEET_LAUNCH AXIOM_FLEET_SHUTDOWN BROKENLINKS BYPASSER4XX
+		CACHE_REFRESH CDN_BYPASS CDN_IP CLOUD_ENUM CMS_SCANNER COMM_INJ
+		CONTINUE_ON_TOOL_ERROR CRLF_CHECKS DEEP DEEP_WILDCARD_FILTER DIFF
+		DOMAIN_INFO EMAILS EXCLUDE_SENSITIVE FARADAY FAVIRECON FUZZ FUZZPARAMS
+		GATO_INCLUDE_ALL_ARTIFACT_SECRETS GEO_INFO GHAURI GITHUB_ACTIONS_AUDIT
+		GITHUB_DORKS GITHUB_LEAKS GITHUB_REPOS GOOGLE_DORKS GQLSPECTION
+		GRAPHQL_CHECK GRPC_SCAN IIS_SHORTNAME INSCOPE IP_INFO IPV6_SCAN
+		JS_SUB_EXTRACT JSCHECKS LFI LLM_PROBE LLM_PROBE_AUGUSTUS MAIL_HYGIENE
+		METADATA MONITOR_MODE NAABU_ENABLE NOTIFICATION NS_DELEGATION
+		NUCLEICHECK OSINT PARALLEL_MODE PARALLEL_PROGRESS_SHOW_ACTIVE
+		PARALLEL_PROGRESS_SHOW_ETA PARAM_DISCOVERY PASSWORD_DICT
+		PORTSCAN_ACTIVE PORTSCAN_PASSIVE PORTSCAN_UDP PORTSCANNER PROXY
+		PTR_SWEEP REMOVELOG REMOVETMP RESOLVER_IQ ROBOTSWORDLIST S3BUCKETS
+		SECOND_ORDER_INSECURE SECRETS_SCAN_GIT_HISTORY SECRETS_VALIDATE
+		SENDZIPNOTIFY SMUGGLING SPOOF SPRAY SQLI SQLMAP SQLMAP_CRAWL_FALLBACK
+		SRV_ENUM SSRF_CHECKS SSTI SSTIMAP_GENERIC SSTIMAP_LEGACY
+		SUB_RECURSIVE_BRUTE SUB_RECURSIVE_PASSIVE SUBANALYTICS SUBBRUTE
+		SUBCRT SUBIAPERMUTE SUBNOERROR SUBPASSIVE SUBPERMUTE SUBREGEXPERMUTE
+		SUBSCRAPING SUBTAKEOVER TEST_SSL THIRD_PARTIES TLS_IP_DELTA_PROBE
+		TLS_IP_PIVOTS URL_CHECK URL_CHECK_ACTIVE URL_CHECK_PASSIVE URL_EXT
+		URL_GF VIRTUALHOSTS VULNS_GENERAL WAF_DETECTION WEBCACHE
+		WEBCACHE_TOXICACHE WEBPROBEFULL WEBSCREENSHOT WELLKNOWN_PIVOTS
+		WORDLIST WP_BRUTE WP_BRUTE_CRAWL WP_BRUTE_USE_OSINT_PASSWORDS XSS
+		ZONETRANSFER
+	)
+
+	local var val val_lc
+	for var in "${bool_vars[@]}"; do
+		# Skip variables that were never set at all -- don't force-declare
+		# something the config/environment never touched.
+		[[ -z "${!var+x}" ]] && continue
+		val="${!var}"
+		val_lc="${val,,}"
+		case "$val_lc" in
+			true | false)
+				if [[ "$val" != "$val_lc" ]]; then
+					printf -v "$var" '%s' "$val_lc"
+				fi
+				;;
+			*) ;; # Not boolean-looking (numeric/path/empty/etc.) -- leave untouched.
+		esac
+	done
+
+	return 0
+}
+
 # validate_integer()
 # Description: Validates an integer within optional range
 # Arguments: $1 - Value, $2 - Min (optional), $3 - Max (optional)

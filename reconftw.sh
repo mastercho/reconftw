@@ -510,6 +510,14 @@ if [[ -s $CUSTOM_CONFIG ]]; then
     }
 fi
 
+# Canonicalize boolean feature flags (TRUE/True/FALSE/False -> true/false).
+# Every module gates behavior via case-sensitive `[[ $VAR == true ]]` checks;
+# without this, a value set via env var/secrets.cfg/custom_config with any
+# casing other than exact lowercase "true"/"false" silently disables the
+# feature with a misleading "already processed"/"skipped" message instead of
+# a clear error. Must run after all config sources, before anything reads them.
+normalize_bool_configs
+
 # Re-apply CLI overrides after config load (config defaults should not clobber CLI flags)
 if [[ "${CLI_MONITOR_MODE:-false}" == "true" ]]; then
     MONITOR_MODE=true
