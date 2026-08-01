@@ -307,9 +307,19 @@ function ssrf_checks() {
                 # `ffuf -search` to reconstruct the original request (URL/host/header).
                 if [[ "$NUMOFLINES" -gt 0 ]] && command -v ffuf &>/dev/null && command -v jq &>/dev/null; then
                     _print_msg INFO "Running: Correlating OOB callbacks to source requests (ffuf -search)"
-                    : >"vulns/ssrf_confirmed.txt"
-                    jq -R -r 'fromjson? | ."full-id"? // empty' ".tmp/ssrf_callback.txt" 2>/dev/null \
-                        | sed '/^$/d' | cut -d'.' -f1 | sort -u >".tmp/ssrf_hit_hashes.txt"
+                    {
+                        printf '# SSRF OOB confirmed findings\n'
+                        printf '# Meaning: interactsh received a callback whose full-id embeds an ffuf request hash.\n'
+                        printf '# That proves something on the request path resolved/fetched our OAST domain.\n'
+                        printf '# It does NOT always identify the single sink parameter (qsreplace may replace all params).\n'
+                        printf '# Format: url | method | vector | hash | oob_protocol | note\n'
+                    } >"vulns/ssrf_confirmed.txt"
+
+                    # Only keep full-ids that look like "<ffufhash>.<interactsh-id>" (skip bare interactsh probes).
+                    jq -R -r 'fromjson? | select((."full-id" // "") | test("^[A-Za-z0-9]{6,}\\.")) | [."full-id", (."protocol" // "unknown")] | @tsv' \
+                        ".tmp/ssrf_callback.txt" 2>/dev/null \
+                        | sed '/^$/d' | sort -u >".tmp/ssrf_hit_map.tsv"
+                    cut -f1 ".tmp/ssrf_hit_map.tsv" 2>/dev/null | cut -d'.' -f1 | sort -u >".tmp/ssrf_hit_hashes.txt"
 
                     if [[ -s ".tmp/ssrf_hit_hashes.txt" ]]; then
                         while IFS= read -r _ssrf_hash; do
@@ -317,29 +327,39 @@ function ssrf_checks() {
                             _ssrf_req=$(ffuf -search "$_ssrf_hash" 2>/dev/null)
                             [[ -z "$_ssrf_req" ]] && continue
                             _ssrf_host=$(grep -aim1 '^Host:' <<<"$_ssrf_req" | sed 's/^[Hh]ost:[[:space:]]*//' | tr -d '\r')
-                            _ssrf_path=$(grep -aoE '^(GET|POST|PUT|HEAD) [^ ]+' <<<"$_ssrf_req" | head -1 | awk '{print $2}')
+                            _ssrf_method=$(grep -aoE '^(GET|POST|PUT|HEAD|PATCH|DELETE) ' <<<"$_ssrf_req" | head -1 | tr -d ' ')
+                            _ssrf_path=$(grep -aoE '^(GET|POST|PUT|HEAD|PATCH|DELETE) [^ ]+' <<<"$_ssrf_req" | head -1 | awk '{print $2}')
                             [[ -z "$_ssrf_host" || -z "$_ssrf_path" ]] && continue
-                            # If the hash also appears in an injected header line (rather
-                            # than the URL itself), name that header for extra context.
-                            _ssrf_hdr=$(grep -ai "$_ssrf_hash" <<<"$_ssrf_req" | grep -aivE '^(GET|POST|PUT|HEAD) ' | head -1)
-                            # Scheme is not present in ffuf -search's reconstructed request
-                            # line (only Host + path); https is the reasonable default for
-                            # modern web targets.
+                            [[ -z "$_ssrf_method" ]] && _ssrf_method="GET"
+
+                            # Real injected HTTP header only (ignore ffuf -search meta lines).
+                            _ssrf_hdr=$(grep -aiE "^[A-Za-z0-9-]+:.*${_ssrf_hash}" <<<"$_ssrf_req" | grep -aivE '^(Host|GET|POST|PUT|HEAD|PATCH|DELETE)[: ]' | head -1 | cut -d: -f1)
+                            _ssrf_proto=$(awk -F'\t' -v h="$_ssrf_hash" 'index($1,h)==1 {print $2; exit}' ".tmp/ssrf_hit_map.tsv" 2>/dev/null)
+                            [[ -z "$_ssrf_proto" ]] && _ssrf_proto="unknown"
+
                             if [[ -n "$_ssrf_hdr" ]]; then
-                                printf 'https://%s%s  [CONFIRMED via OOB - header: %s]\n' "$_ssrf_host" "$_ssrf_path" "$_ssrf_hdr"
+                                _ssrf_vector="header:${_ssrf_hdr}"
+                                _ssrf_note="OAST ${_ssrf_proto} callback matched ffuf hash in header ${_ssrf_hdr}"
+                            elif [[ "$_ssrf_path" == *"$_ssrf_hash"* ]]; then
+                                _ssrf_vector="url-query"
+                                _ssrf_note="OAST ${_ssrf_proto} callback matched ffuf hash in URL (all qsreplace params may contain payload; sink param unknown)"
                             else
-                                printf 'https://%s%s  [CONFIRMED via OOB callback]\n' "$_ssrf_host" "$_ssrf_path"
+                                _ssrf_vector="unknown"
+                                _ssrf_note="OAST ${_ssrf_proto} callback matched ffuf hash; request reconstructed but hash location unclear"
                             fi
+
+                            printf 'https://%s%s | %s | %s | hash=%s | oob=%s | %s\n' \
+                                "$_ssrf_host" "$_ssrf_path" "$_ssrf_method" "$_ssrf_vector" "$_ssrf_hash" "$_ssrf_proto" "$_ssrf_note"
                         done <".tmp/ssrf_hit_hashes.txt" | anew -q "vulns/ssrf_confirmed.txt"
                     fi
 
-                    if [[ -s "vulns/ssrf_confirmed.txt" ]]; then
-                        notification "SSRF: $(wc -l <"vulns/ssrf_confirmed.txt") CONFIRMED finding(s) - see vulns/ssrf_confirmed.txt" warn
+                    if grep -qE '^https?://' "vulns/ssrf_confirmed.txt" 2>/dev/null; then
+                        notification "SSRF: $(grep -cE '^https?://' "vulns/ssrf_confirmed.txt") CONFIRMED OOB finding(s) - see vulns/ssrf_confirmed.txt" warn
                     fi
                 fi
             fi
 
-            end_func "Results are saved in vulns/ssrf_* -- vulns/ssrf_confirmed.txt holds OOB-verified findings, the rest are unconfirmed candidates" "${FUNCNAME[0]}"
+            end_func "Results are saved in vulns/ssrf_* -- vulns/ssrf_confirmed.txt = OOB-verified, others = unconfirmed candidates" "${FUNCNAME[0]}"
         else
             end_func "Skipping SSRF: Too many URLs to test, try with --deep flag." "${FUNCNAME[0]}"
         fi
@@ -827,13 +847,72 @@ function sqli_sqlmap() {
             --batch --disable-coloring --random-agent --level=3 --risk=2 \
             --output-dir="vulns/sqlmap" >>"$sqlmap_log" 2>&1 || true
         cat "$sqlmap_log" >>"$LOGFILE" 2>/dev/null || true
+        _sqli_sqlmap_write_crawl_findings
     else
         _print_msg INFO "Running: SQLMap for SQLi Checks"
         run_command python3 "${tools}/sqlmap/sqlmap.py" -m ".tmp/tmp_sqli.txt" -b -o --smart \
             --batch --disable-coloring --random-agent --level=5 --risk=3 \
             --output-dir="vulns/sqlmap" 2>>"$LOGFILE" >/dev/null
     fi
-    end_func "Results are saved in vulns/sqlmap" "$fn"
+    end_func "Results are saved in vulns/sqlmap (crawl hits also summarized in vulns/sqlmap/crawl_findings.txt)" "$fn"
+}
+
+# Summarize sqlmap crawl outcome into a short file so hits are obvious without reading the full log.
+_sqli_sqlmap_write_crawl_findings() {
+    local findings="vulns/sqlmap/crawl_findings.txt"
+    local csv_hits=0
+    local log_hits=0
+    local forms_tested=0
+    local no_usable=0
+    local csv_file
+
+    mkdir -p vulns/sqlmap
+    {
+        printf 'Started: %s\n' "$(date +'%Y-%m-%d %H:%M:%S')"
+        printf 'Source log: vulns/sqlmap/crawl_fallback.log\n'
+        printf '\n== How to read this ==\n'
+        printf 'HIT  = sqlmap reported injectable/vulnerable parameter(s)\n'
+        printf 'CSV  = rows in vulns/sqlmap/results-*.csv\n'
+        printf 'NO   = crawl ran but found no injectable params\n\n'
+    } >"$findings"
+
+    forms_tested=$(grep -acE '^\[.*/.*\] Form:' "vulns/sqlmap/crawl_fallback.log" 2>/dev/null || echo 0)
+    no_usable=$(grep -ac 'no usable links found' "vulns/sqlmap/crawl_fallback.log" 2>/dev/null || echo 0)
+    printf 'Forms discovered/tested: %s\n' "$forms_tested" >>"$findings"
+    printf 'Roots with no usable links/forms: %s\n\n' "$no_usable" >>"$findings"
+
+    # Prefer sqlmap multi-target CSV (only real confirmed injectables land here).
+    for csv_file in vulns/sqlmap/results-*.csv; do
+        [[ -s "$csv_file" ]] || continue
+        if awk 'NR>1 && NF>0 {found=1; exit} END{exit !found}' "$csv_file" 2>/dev/null; then
+            printf '== CSV hits from %s ==\n' "$csv_file" >>"$findings"
+            awk 'NR==1 || NF>0' "$csv_file" >>"$findings"
+            printf '\n' >>"$findings"
+            csv_hits=$(awk 'NR>1 && NF>0 {c++} END{print c+0}' "$csv_file")
+        fi
+    done
+
+    # Also pull high-signal lines from the raw crawl log.
+    if [[ -s "vulns/sqlmap/crawl_fallback.log" ]]; then
+        grep -aE 'is vulnerable|appears to be injectable|sqlmap identified the following injection|Parameter: .* \|' \
+            "vulns/sqlmap/crawl_fallback.log" 2>/dev/null \
+            | sed 's/\r$//' | anew -q ".tmp/sqlmap_crawl_hit_lines.txt" || true
+        if [[ -s ".tmp/sqlmap_crawl_hit_lines.txt" ]]; then
+            printf '== High-signal lines from crawl_fallback.log ==\n' >>"$findings"
+            cat ".tmp/sqlmap_crawl_hit_lines.txt" >>"$findings"
+            printf '\n' >>"$findings"
+            log_hits=$(wc -l <".tmp/sqlmap_crawl_hit_lines.txt" | tr -d ' ')
+        fi
+    fi
+
+    if ((csv_hits > 0 || log_hits > 0)); then
+        printf 'RESULT: HIT (csv_hits=%s, log_hit_lines=%s)\n' "$csv_hits" "$log_hits" >>"$findings"
+        notification "SQLMap crawl: HIT detected - see vulns/sqlmap/crawl_findings.txt" warn
+        _print_msg WARN "SQLMap crawl findings written to vulns/sqlmap/crawl_findings.txt"
+    else
+        printf 'RESULT: NO injectable parameters found by crawl fallback\n' >>"$findings"
+        _print_msg INFO "SQLMap crawl: no injectable findings (summary in vulns/sqlmap/crawl_findings.txt)"
+    fi
 }
 
 function sqli_ghauri() {
