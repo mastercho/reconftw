@@ -299,13 +299,17 @@ _ssrf_probe_cve_2022_1386() {
         probed=$((probed + 1))
 
         # Call python directly (do not wrap in run_command — need stdout for NDJSON).
+        # Also writes Burp-ready raw requests under vulns/ssrf_requests/*.http
+        mkdir -p vulns/ssrf_requests
         if [[ "$oast_reflected" -eq 1 ]]; then
             "$pybin" "$json_helper" probe-fusion "$ajax_url" \
                 --oast-reflected --oast-url "$oast_url" \
+                --requests-dir "vulns/ssrf_requests" \
                 ${HEADER:+--header "$HEADER"} \
                 2>>"$LOGFILE" | anew -q ".tmp/ssrf_cve1386_hits.txt" || true
         else
             "$pybin" "$json_helper" probe-fusion "$ajax_url" \
+                --requests-dir "vulns/ssrf_requests" \
                 ${HEADER:+--header "$HEADER"} \
                 2>>"$LOGFILE" | anew -q ".tmp/ssrf_cve1386_hits.txt" || true
         fi
@@ -507,7 +511,9 @@ function ssrf_checks() {
                                 local _pybin=python3
                                 command -v python3 >/dev/null 2>&1 || _pybin=python
                                 [[ -f "${SCRIPTPATH}/lib/ssrf_confirmed_json.py" ]] || continue
+                                mkdir -p vulns/ssrf_requests
                                 "$_pybin" "${SCRIPTPATH}/lib/ssrf_confirmed_json.py" probe-fusion "$_nurl" \
+                                    --requests-dir "vulns/ssrf_requests" \
                                     ${HEADER:+--header "$HEADER"} \
                                     2>>"$LOGFILE" | anew -q ".tmp/ssrf_cve1386_hits.txt" || true
                             done
@@ -628,6 +634,7 @@ function ssrf_checks() {
                                 --vector "$_ssrf_vector" \
                                 --sink-url "http://${_ssrf_hash}.oast" \
                                 --evidence "$_ssrf_note" \
+                                --requests-dir "vulns/ssrf_requests" \
                                 2>>"$LOGFILE" | anew -q ".tmp/ssrf_oob_confirmed.jsonl" || true
                         done <".tmp/ssrf_hit_hashes.txt"
                     fi
@@ -659,7 +666,7 @@ function ssrf_checks() {
                 _print_msg INFO "SSRF: no confirmed findings (see vulns/ssrf_confirmed.txt)"
             fi
 
-            end_func "Results are saved in vulns/ssrf_* -- vulns/ssrf_confirmed.txt = confirmed NDJSON, others = unconfirmed candidates" "${FUNCNAME[0]}"
+            end_func "Results: vulns/ssrf_confirmed.txt + vulns/ssrf_requests/<host>.http (Burp)" "${FUNCNAME[0]}"
         else
             end_func "Skipping SSRF: Too many URLs to test, try with --deep flag." "${FUNCNAME[0]}"
         fi
