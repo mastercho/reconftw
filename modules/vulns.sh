@@ -297,13 +297,13 @@ _ssrf_probe_cve_2022_1386() {
     done <".tmp/ssrf_cve1386_hosts_norm.txt"
 
     if [[ -z "$oast_host" ]]; then
-        _print_msg INFO "CVE-2022-1386: no collaborator domain — confirmed only via cloud sink responses"
+        _print_msg INFO "CVE-2022-1386: no collaborator — confirming via in-band canary + cloud sinks"
     fi
 
     if [[ -s ".tmp/ssrf_cve1386_hits.txt" ]]; then
         notification "SSRF: CVE-2022-1386 confirmed hit(s) → vulns/ssrf_confirmed.txt" warn
     else
-        _print_msg INFO "CVE-2022-1386 probe finished (${probed} host(s); no cloud-sink/OAST confirmation)"
+        _print_msg INFO "CVE-2022-1386 probe finished (${probed} host(s); no in-band/cloud/OAST confirmation)"
     fi
 }
 
@@ -505,6 +505,7 @@ function ssrf_checks() {
             sleep 10
 
             # Process SSRF callback results if INTERACT is enabled.
+            : >".tmp/ssrf_oob_confirmed.jsonl"
             if [[ $INTERACT == true ]] && [[ -s ".tmp/ssrf_callback.txt" ]]; then
                 # Keep human-readable banner lines for debugging, but count ONLY real
                 # interactsh -json interaction records. Previously we did
@@ -516,12 +517,6 @@ function ssrf_checks() {
                 NUMOFLINES=$(printf '%s' "$NUMOFLINES" | tr -d '[:space:]')
                 [[ "$NUMOFLINES" =~ ^[0-9]+$ ]] || NUMOFLINES=0
                 notification "SSRF: ${NUMOFLINES} OOB interaction(s) received" info
-
-                {
-                    printf '# SSRF confirmed findings (NDJSON)\n'
-                    printf '# Each line: {"target","vulnerable","ssrf_hits":[{"desc","url","status","evidence"},...]}\n'
-                    printf '# ssrf_hits[].url = internal/OAST URL the vulnerable endpoint fetched\n'
-                } >"vulns/ssrf_confirmed.txt"
 
                 # Correlate each OOB hit back to the exact request that triggered it,
                 # using ffuf's built-in FFUFHASH history mapping (`ffuf -search <hash>`,
@@ -618,39 +613,35 @@ function ssrf_checks() {
                                 --vector "$_ssrf_vector" \
                                 --sink-url "http://${_ssrf_hash}.oast" \
                                 --evidence "$_ssrf_note" \
-                                2>>"$LOGFILE" | anew -q "vulns/ssrf_confirmed.txt" || true
+                                2>>"$LOGFILE" | anew -q ".tmp/ssrf_oob_confirmed.jsonl" || true
                         done <".tmp/ssrf_hit_hashes.txt"
                     fi
                 fi
-
-                if grep -qE '^\{' "vulns/ssrf_confirmed.txt" 2>/dev/null; then
-                    notification "SSRF: $(grep -cE '^\{' "vulns/ssrf_confirmed.txt") CONFIRMED finding(s) - see vulns/ssrf_confirmed.txt" warn
-                else
-                    printf 'RESULT: NO OOB-confirmed SSRF (interactions=%s; correlated_urls=0)\n' "$NUMOFLINES" >>"vulns/ssrf_confirmed.txt"
-                    _print_msg INFO "SSRF: no OOB-confirmed findings (see vulns/ssrf_confirmed.txt)"
-                fi
             fi
 
-            # CVE-2022-1386 confirmed hits → ssrf_confirmed.txt only (NDJSON).
+            # Always rebuild ssrf_confirmed.txt as NDJSON-only (never keep legacy pipe lines).
+            {
+                printf '# SSRF confirmed findings (NDJSON)\n'
+                printf '# Each line: {"target","vulnerable","ssrf_hits":[{"desc","url","status","evidence"},...]}\n'
+                printf '# ssrf_hits[].url = internal/OAST URL the vulnerable endpoint fetched\n'
+            } >"vulns/ssrf_confirmed.txt"
+
+            : >".tmp/ssrf_confirmed_json_only.txt"
             if [[ -s ".tmp/ssrf_cve1386_hits.txt" ]]; then
-                if [[ ! -s "vulns/ssrf_confirmed.txt" ]]; then
-                    {
-                        printf '# SSRF confirmed findings (NDJSON)\n'
-                        printf '# Each line: {"target","vulnerable","ssrf_hits":[{"desc","url","status","evidence"},...]}\n'
-                    } >"vulns/ssrf_confirmed.txt"
-                fi
-                if grep -qE '^RESULT: NO' "vulns/ssrf_confirmed.txt" 2>/dev/null; then
-                    grep -avE '^RESULT: NO' "vulns/ssrf_confirmed.txt" >".tmp/ssrf_confirmed_scrub.txt" \
-                        && mv ".tmp/ssrf_confirmed_scrub.txt" "vulns/ssrf_confirmed.txt"
-                fi
-                _before=$(grep -cE '^\{' "vulns/ssrf_confirmed.txt" 2>/dev/null || true)
-                [[ "$_before" =~ ^[0-9]+$ ]] || _before=0
-                cat ".tmp/ssrf_cve1386_hits.txt" | anew -q "vulns/ssrf_confirmed.txt"
-                _after=$(grep -cE '^\{' "vulns/ssrf_confirmed.txt" 2>/dev/null || true)
-                [[ "$_after" =~ ^[0-9]+$ ]] || _after=0
-                if [[ "$_after" -gt "$_before" ]]; then
-                    notification "SSRF: ${_after} CONFIRMED finding(s) - see vulns/ssrf_confirmed.txt" warn
-                fi
+                grep -aE '^\{' ".tmp/ssrf_cve1386_hits.txt" 2>/dev/null >>".tmp/ssrf_confirmed_json_only.txt" || true
+            fi
+            if [[ -s ".tmp/ssrf_oob_confirmed.jsonl" ]]; then
+                grep -aE '^\{' ".tmp/ssrf_oob_confirmed.jsonl" 2>/dev/null >>".tmp/ssrf_confirmed_json_only.txt" || true
+            fi
+            if [[ -s ".tmp/ssrf_confirmed_json_only.txt" ]]; then
+                sort -u ".tmp/ssrf_confirmed_json_only.txt" | anew -q "vulns/ssrf_confirmed.txt"
+            fi
+
+            if grep -qE '^\{' "vulns/ssrf_confirmed.txt" 2>/dev/null; then
+                notification "SSRF: $(grep -cE '^\{' "vulns/ssrf_confirmed.txt") CONFIRMED finding(s) - see vulns/ssrf_confirmed.txt" warn
+            else
+                printf 'RESULT: NO confirmed SSRF (no cloud-sink or OAST NDJSON hits)\n' >>"vulns/ssrf_confirmed.txt"
+                _print_msg INFO "SSRF: no confirmed findings (see vulns/ssrf_confirmed.txt)"
             fi
 
             end_func "Results are saved in vulns/ssrf_* -- vulns/ssrf_confirmed.txt = confirmed NDJSON, others = unconfirmed candidates" "${FUNCNAME[0]}"
