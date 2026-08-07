@@ -706,13 +706,7 @@ function ssrf_checks() {
                 fi
             fi
 
-            # Always rebuild ssrf_confirmed.txt as NDJSON-only (never keep legacy pipe lines).
-            {
-                printf '# SSRF confirmed findings (NDJSON)\n'
-                printf '# Each line: {"target","vulnerable","ssrf_hits":[{"desc","url","status","evidence"},...]}\n'
-                printf '# ssrf_hits[].url = internal/OAST URL the vulnerable endpoint fetched\n'
-            } >"vulns/ssrf_confirmed.txt"
-
+            # Write vulns/ssrf_confirmed.txt only when there is at least one NDJSON hit.
             : >".tmp/ssrf_confirmed_json_only.txt"
             if [[ -s ".tmp/ssrf_cve1386_hits.txt" ]]; then
                 grep -aE '^\{' ".tmp/ssrf_cve1386_hits.txt" 2>/dev/null >>".tmp/ssrf_confirmed_json_only.txt" || true
@@ -720,19 +714,21 @@ function ssrf_checks() {
             if [[ -s ".tmp/ssrf_oob_confirmed.jsonl" ]]; then
                 grep -aE '^\{' ".tmp/ssrf_oob_confirmed.jsonl" 2>/dev/null >>".tmp/ssrf_confirmed_json_only.txt" || true
             fi
-            # Append NDJSON directly — do NOT use anew (missing anew = silent empty confirmed).
+
             if [[ -s ".tmp/ssrf_confirmed_json_only.txt" ]]; then
-                sort -u ".tmp/ssrf_confirmed_json_only.txt" >>"vulns/ssrf_confirmed.txt"
-            fi
-
-            if grep -qE '^\{' "vulns/ssrf_confirmed.txt" 2>/dev/null; then
+                {
+                    printf '# SSRF confirmed findings (NDJSON)\n'
+                    printf '# Each line: {"target","vulnerable","ssrf_hits":[{"desc","url","status","evidence"},...]}\n'
+                    printf '# ssrf_hits[].url = internal/OAST URL the vulnerable endpoint fetched\n'
+                    sort -u ".tmp/ssrf_confirmed_json_only.txt"
+                } >"vulns/ssrf_confirmed.txt"
                 notification "SSRF: $(grep -cE '^\{' "vulns/ssrf_confirmed.txt") CONFIRMED finding(s) - see vulns/ssrf_confirmed.txt" warn
+                end_func "Results: vulns/ssrf_confirmed.txt + vulns/ssrf_requests/<host>.http (Burp)" "${FUNCNAME[0]}"
             else
-                printf 'RESULT: NO confirmed SSRF (no in-band canary, cloud-sink, or OAST NDJSON hits)\n' >>"vulns/ssrf_confirmed.txt"
-                _print_msg INFO "SSRF: no confirmed findings (see vulns/ssrf_confirmed.txt)"
+                rm -f "vulns/ssrf_confirmed.txt"
+                _print_msg INFO "SSRF: no confirmed findings (ssrf_confirmed.txt not created)"
+                end_func "Results: no confirmed SSRF" "${FUNCNAME[0]}"
             fi
-
-            end_func "Results: vulns/ssrf_confirmed.txt + vulns/ssrf_requests/<host>.http (Burp)" "${FUNCNAME[0]}"
         else
             end_func "Skipping SSRF: Too many URLs to test, try with --deep flag." "${FUNCNAME[0]}"
         fi
